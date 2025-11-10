@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+sample-list.csv
+sample-list.xlsx
+.last-used-file

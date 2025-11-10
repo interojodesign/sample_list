@@ -1,0 +1,238 @@
+:root {
+  font-family: "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  color: #3e3a39;
+  background-color: #fff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #fff;
+  color: #3e3a39;
+}
+
+.app-header {
+  padding: 2rem clamp(1.5rem, 5vw, 4rem) 1rem;
+  background: linear-gradient(135deg, #1e3a8a, #2563eb);
+  color: #fff;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: flex-end;
+  justify-content: space-between;
+}
+
+.eyebrow {
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-size: 0.8rem;
+  opacity: 0.8;
+  margin: 0 0 0.4rem 0;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: clamp(1.8rem, 3vw, 2.4rem);
+}
+
+.subtitle {
+  margin: 0.4rem 0 0;
+  max-width: 720px;
+  opacity: 0.9;
+}
+
+.status-badge {
+  padding: 0.4rem 0.8rem;
+  background: rgba(255, 255, 255, 0.18);
+  backdrop-filter: blur(6px);
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+main {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: clamp(1rem, 3vw, 2.5rem);
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.card {
+  background: #fff;
+  border-radius: 1rem;
+  padding: 1.5rem;
+  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.08);
+}
+
+.card h2 {
+  margin-top: 0;
+}
+
+.controls-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.8rem;
+  margin-top: 1rem;
+}
+
+button,
+.file-input {
+  border: none;
+  border-radius: 0.6rem;
+  padding: 0.8rem 1rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  background: #2563eb;
+  color: #fff;
+  cursor: pointer;
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+  width: 100%;
+}
+
+button:hover,
+.file-input:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 20px rgba(37, 99, 235, 0.2);
+}
+
+button:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+button.secondary {
+  background: #0f172a;
+}
+
+button.ghost {
+  background: #e0e7ff;
+  color: #1e3a8a;
+}
+
+button.danger {
+  background: #dc2626;
+}
+
+.file-input {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.file-input input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.hint {
+  margin-top: 0.8rem;
+  color: #4b5563;
+  font-size: 0.9rem;
+}
+
+.column-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+label {
+  font-size: 0.9rem;
+  color: #4b5563;
+}
+
+input,
+select {
+  border: 1px solid #cbd5f5;
+  border-radius: 0.6rem;
+  padding: 0.6rem 0.8rem;
+  font-size: 1rem;
+}
+
+.inline-inputs {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.inline-inputs select {
+  flex: 1;
+}
+
+.table-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.6rem;
+  margin-top: 1rem;
+  background: #fff;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 720px;
+}
+
+th,
+td {
+  border: 1px solid #e5e7eb;
+  padding: 0.6rem 0.8rem;
+  text-align: left;
+  font-size: 0.95rem;
+}
+
+th {
+  background: #f8fafc;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+td {
+  background: #fff;
+  min-width: 100px;
+}
+
+td[contenteditable="true"]:focus {
+  outline: 2px solid #2563eb;
+  background: #eef2ff;
+}
+
+td.empty {
+  text-align: center;
+  color: #94a3b8;
+  font-style: italic;
+  background: #f8fafc;
+}
+
+@media (max-width: 720px) {
+  .app-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .inline-inputs {
+    flex-direction: column;
+  }
+}

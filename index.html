@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>샘플 리스트 관리자</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script
+      defer
+      src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"
+    ></script>
+    <script
+      defer
+      src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"
+    ></script>
+    <script defer src="app.js"></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">오프라인 관리용</p>
+        <h1>샘플 리스트 관리자</h1>
+        <p class="subtitle">
+          CSV/엑셀 파일을 불러와 웹에서 바로 편집하고 열을 자유롭게
+          관리하세요. 저장 시 같은 폴더에 다시 내려받을 수 있습니다.
+        </p>
+      </div>
+      <div class="status-badge" id="status">새 문서</div>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>파일 불러오기 / 저장</h2>
+        <div class="controls-grid">
+          <label class="file-input">
+            <span>CSV 또는 엑셀 선택</span>
+            <input type="file" id="file-input" accept=".csv,.xlsx,.xls" />
+          </label>
+          <button id="new-table-btn" class="secondary">초기 표 불러오기</button>
+          <button id="download-csv-btn">CSV로 저장</button>
+          <button id="download-xlsx-btn">엑셀로 저장</button>
+          <button id="open-picker-btn" class="ghost">
+            폴더에서 직접 열기 (실험 기능)
+          </button>
+          <button id="save-file-handle-btn" class="ghost">
+            동일 파일에 덮어쓰기 (실험 기능)
+          </button>
+        </div>
+        <p class="hint">
+          크롬/엣지 최신 버전에서만 “실험 기능” 버튼이 동작하며, 반드시
+          localhost 또는 HTTPS 환경에서 페이지를 열어야 합니다. 그 외
+          브라우저에서는 다운로드 버튼을 사용하세요.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>열 관리</h2>
+        <div class="column-actions">
+          <form id="add-column-form">
+            <label for="new-column-name">새 열 이름</label>
+            <input
+              type="text"
+              id="new-column-name"
+              placeholder="예: 샘플 접수일"
+              required
+            />
+            <button type="submit">열 추가</button>
+          </form>
+          <form id="rename-column-form">
+            <label for="rename-column-select">이름 변경</label>
+            <div class="inline-inputs">
+              <select id="rename-column-select"></select>
+              <input
+                type="text"
+                id="rename-column-value"
+                placeholder="새 이름"
+                required
+              />
+            </div>
+            <button type="submit" class="secondary">열 이름 변경</button>
+          </form>
+          <form id="delete-column-form">
+            <label for="delete-column-select">열 삭제</label>
+            <select id="delete-column-select"></select>
+            <button type="submit" class="danger">선택 열 삭제</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="table-header">
+          <h2>데이터 테이블</h2>
+          <div class="table-actions">
+            <button id="add-row-btn" class="secondary">행 추가</button>
+            <button id="delete-row-btn" class="secondary">마지막 행 삭제</button>
+          </div>
+        </div>
+        <div class="table-wrapper">
+          <table id="data-table">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="hint">
+          각 셀은 바로 수정할 수 있습니다. 수정 내용은 자동으로 메모리에
+          반영되며, 저장 버튼을 눌러 CSV/엑셀 파일로 내려받을 수 있습니다.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>
