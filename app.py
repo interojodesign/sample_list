@@ -6,12 +6,14 @@ import io
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import OrderedDict
+import html
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
+from urllib.parse import urlencode
 
 
 st.set_page_config(
@@ -551,6 +553,55 @@ def prepare_dashboard_data(
     return filtered
 
 
+def render_period_selector(
+    today: datetime, key_prefix: str
+) -> tuple[str, datetime, datetime]:
+    period_options = list(FILTER_PRESETS.keys())
+    period_choice = st.radio(
+        "조회 범위",
+        period_options,
+        horizontal=True,
+        index=1,
+        label_visibility="collapsed",
+        key=f"{key_prefix}_period",
+    )
+    preset_start, preset_end = FILTER_PRESETS[period_choice](today)
+    if period_choice in {"월별", "분기별", "반기별", "년도별"}:
+        expander_col, _ = st.columns([1.5, 2])
+        with expander_col.expander("기간 선택", expanded=False):
+            col_a, col_b = st.columns(2)
+            preset_start = col_a.date_input(
+                "시작일",
+                value=preset_start.date(),
+                max_value=today.date(),
+                key=f"{key_prefix}_start",
+            )
+            preset_end = col_b.date_input(
+                "종료일",
+                value=preset_end.date(),
+                max_value=today.date(),
+                key=f"{key_prefix}_end",
+            )
+            if preset_start > preset_end:
+                st.warning("시작일이 종료일보다 클 수 없습니다.")
+                st.stop()
+            preset_start = datetime.combine(preset_start, datetime.min.time())
+            preset_end = datetime.combine(preset_end, datetime.max.time())
+    return period_choice, preset_start, preset_end
+
+
+def normalize_query_value(value, default: str) -> str:
+    if value is None:
+        return default
+    if isinstance(value, list):
+        return value[0] if value else default
+    return str(value)
+
+
+def set_query_params(**kwargs: str) -> None:
+    st.query_params = {k: v for k, v in kwargs.items() if v is not None}
+
+
 def build_location_stage_summary(df: pd.DataFrame) -> OrderedDict[str, dict[str, int]]:
     summary = OrderedDict((loc, {stage: 0 for stage in STAGE_ORDER}) for loc in LOCATION_DISPLAY_ORDER)
     if df.empty:
@@ -605,24 +656,30 @@ def render_location_card(stage_summary: OrderedDict[str, dict[str, int]]) -> str
                     f"<div class='factory-bar-segment' style='width:{percentage:.4f}%;background:{STAGE_COLORS.get(stage, '#d1d5db')}' title='{stage}: {count}건'></div>"
                 )
         bar_inner = "".join(segments) if segments else "<div class='factory-bar-empty'>데이터 없음</div>"
-        row_html = (
-            "<div class='factory-row'>"
-            f"<div class='factory-name'>{loc}</div>"
-            f"<div class='factory-row-bar'>{bar_inner}</div>"
-            f"<button type='button' class='factory-detail-btn' data-factory='{loc}'>상세보기</button>"
-            "</div>"
+        query = urlencode({"view": "factory", "factory": loc})
+        safe_query = html.escape(query, quote=True)
+        rows_html.append(
+            f"<div class='factory-row'><div class='factory-name'>{loc}</div><div class='factory-row-bar'>{bar_inner}</div><a class='factory-detail-btn' href='?{safe_query}'>상세보기</a></div>"
         )
-        rows_html.append(row_html)
-    html = (
+    card_html = (
         "<div class='chart-card factory-card'><div class='chart-card-title'>공장별 샘플 진행 현황</div>"
         + "".join(rows_html)
         + "</div>"
     )
-    return html
+    return card_html
 
 
-def render_chart_card(fig: go.Figure, title: str | None = None) -> None:
-    fig.update_layout(width=420, height=360, margin=dict(t=20, b=20, l=10, r=10))
+def render_chart_card(
+    fig: go.Figure,
+    title: str | None = None,
+    *,
+    chart_width: int | None = None,
+    chart_height: int | None = None,
+    card_width: int = 560,
+) -> None:
+    width = chart_width or fig.layout.width or 420
+    height = chart_height or fig.layout.height or 360
+    fig.update_layout(width=width, height=height, margin=dict(t=20, b=20, l=10, r=10))
     html = fig.to_html(include_plotlyjs="cdn", full_html=False)
     title_html = (
         "<div style='font-weight:700;color:#1f2937;margin-bottom:0.4rem;'>"
@@ -630,27 +687,27 @@ def render_chart_card(fig: go.Figure, title: str | None = None) -> None:
         if title
         else ""
     )
-    style_block = """
+    style_block = f"""
     <style>
-    html, body {
+    html, body {{
         margin: 0;
         padding: 0;
-    }
-    .inline-chart-card {
+    }}
+    .inline-chart-card {{
         background:#fff;
         border-radius:1rem;
         border:1px solid #dfe4f2;
         padding:0.75rem 1rem 1rem;
         margin:0 0 1rem;
-        width:560px;
-        max-width:560px;
+        width:{card_width}px;
+        max-width:{card_width}px;
         box-sizing:border-box;
         box-shadow:none;
-    }
-    .inline-chart-body {
+    }}
+    .inline-chart-body {{
         display:flex;
         justify-content:center;
-    }
+    }}
     </style>
     """
     card_html = (
@@ -690,42 +747,7 @@ def render_sample_dashboard() -> None:
     )
     today = datetime.now()
     st.caption(f"{today:%Y년 %m월 %d일 %H:%M 기준}")
-    period_map = {
-        "주간": 7,
-        "월별": 30,
-        "분기별": 90,
-        "반기별": 182,
-        "년도별": 365,
-    }
-    period_choice = st.radio(
-        "조회 단위",
-        list(period_map.keys()),
-        horizontal=True,
-        index=1,
-        label_visibility="collapsed",
-    )
-
-    preset_start, preset_end = FILTER_PRESETS[period_choice](today)
-    custom_mode = period_choice in {"월별", "분기별", "반기별", "년도별"}
-    if custom_mode:
-        expander_col, _ = st.columns([1.5, 2])
-        with expander_col.expander("기간 선택", expanded=False):
-            col_a, col_b = st.columns(2)
-            preset_start = col_a.date_input(
-                "시작일",
-                value=preset_start.date(),
-                max_value=today.date(),
-            )
-            preset_end = col_b.date_input(
-                "종료일",
-                value=preset_end.date(),
-                max_value=today.date(),
-            )
-            if preset_start > preset_end:
-                st.warning("시작일이 종료일보다 앞서야 합니다.")
-                return
-            preset_start = datetime.combine(preset_start, datetime.min.time())
-            preset_end = datetime.combine(preset_end, datetime.max.time())
+    _, preset_start, preset_end = render_period_selector(today, "main")
 
     target_df = prepare_dashboard_data(
         st.session_state.df, preset_start, preset_end
@@ -826,6 +848,76 @@ def render_sample_dashboard() -> None:
                 unsafe_allow_html=True,
             )
         st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_factory_detail_page(factory_name: str) -> None:
+    today = datetime.now()
+    st.markdown(
+        f"""
+        <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:0.6rem;">
+            <div>
+                <div style="font-size:2rem;font-weight:800;color:#1f2937;">샘플 진행 현황 - {factory_name}</div>
+                <div style="color:#6b7280;">{today:%Y년 %m월 %d일 %H:%M 기준}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    _, preset_start, preset_end = render_period_selector(today, f"factory_{factory_name}")
+    st.caption(f"{preset_start:%Y년 %m월 %d일} ~ {preset_end:%Y년 %m월 %d일} 데이터 기준")
+
+    target_df = prepare_dashboard_data(
+        st.session_state.df, preset_start, preset_end
+    )
+    target_df = target_df[target_df[LOCATION_COLUMN] == factory_name]
+    if target_df.empty:
+        st.info(f"{factory_name}에 해당하는 샘플이 없습니다.")
+        return
+
+    stage_counts = (
+        target_df["__stage__"].value_counts().reindex(STAGE_ORDER, fill_value=0)
+    )
+
+    fig = go.Figure()
+    for stage in STAGE_ORDER:
+        value = stage_counts[stage]
+        if not value:
+            continue
+        fig.add_trace(
+            go.Bar(
+                y=[factory_name],
+                x=[value],
+                name=stage,
+                orientation="h",
+                marker_color=STAGE_COLORS.get(stage, "#d1d5db"),
+                hovertemplate=f"{stage}: %{{x}}건<extra></extra>",
+            )
+        )
+    fig.update_layout(
+        barmode="stack",
+        height=140,
+        margin=dict(l=10, r=10, t=10, b=10),
+        showlegend=False,
+    )
+    fig.update_yaxes(visible=False)
+    fig.update_xaxes(visible=False)
+    render_chart_card(fig, chart_width=560, chart_height=200, card_width=560)
+
+    legend_html = "".join(
+        f"<span><span class='legend-dot' style='background:{STAGE_COLORS.get(stage, '#d1d5db')}'></span>{stage} {int(stage_counts[stage])}건</span>"
+        for stage in STAGE_ORDER
+    )
+    st.markdown(
+        f"<div class='status-legend'>{legend_html}</div>",
+        unsafe_allow_html=True,
+    )
+
+    detail_df = target_df.drop(columns=["__stage__"])
+    st.dataframe(
+        detail_df,
+        use_container_width=True,
+        height=min(600, 200 + 35 * len(detail_df)),
+    )
 
 
 def render_limit_dashboard() -> None:
@@ -1231,18 +1323,36 @@ def main() -> None:
         """,
         unsafe_allow_html=True,
     )
-    st.sidebar.header("페이지")
-    page = st.sidebar.radio(
-        "",
-        ("샘플 제작", "한도 제작", "관리 페이지"),
-        index=0,
-    )
+    params = st.query_params
+    view_param = normalize_query_value(params.get("view"), "sample")
+    factory_param = normalize_query_value(params.get("factory"), "")
 
-    if page == "샘플 제작":
-        render_sample_dashboard()
+    page_options = ("샘플 진행", "한도 제작", "관리 페이지")
+    page_index = {"sample": 0, "factory": 0, "limit": 1, "admin": 2}.get(view_param, 0)
+    page = st.sidebar.radio("페이지", page_options, index=page_index)
+
+    if page == "샘플 진행":
+        factory_options = ("전체",) + tuple(LOCATION_DISPLAY_ORDER)
+        if view_param == "factory" and factory_param in LOCATION_DISPLAY_ORDER:
+            factory_index = factory_options.index(factory_param)
+        else:
+            factory_index = 0
+        selected_factory = st.sidebar.radio(
+            "샘플 진행",
+            factory_options,
+            index=factory_index,
+        )
+        if selected_factory == "전체":
+            set_query_params(view="sample")
+            render_sample_dashboard()
+        else:
+            set_query_params(view="factory", factory=selected_factory)
+            render_factory_detail_page(selected_factory)
     elif page == "한도 제작":
+        set_query_params(view="limit")
         render_limit_dashboard()
     else:
+        set_query_params(view="admin")
         render_admin_page()
 
 
