@@ -11,6 +11,8 @@ import html
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 import streamlit as st
 import streamlit.components.v1 as components
 from urllib.parse import urlencode
@@ -27,6 +29,7 @@ LAST_FILE_RECORD = BASE_DIR / ".last-used-file"
 SELECTION_COLUMN = "__row_select__"
 SELECTION_LABEL = "행 선택"
 HISTORY_LIMIT = 30
+SCROLL_TO_TABLE_FLAG = "__scroll_to_data_table__"
 LOCATION_COLUMN = "샘플제작 공장위치"
 LOCATION_CANDIDATE_COLUMNS = [
     LOCATION_COLUMN,
@@ -34,6 +37,11 @@ LOCATION_CANDIDATE_COLUMNS = [
     "샘플제작공장위치",
 ]
 LOCATION_DISPLAY_ORDER = ["C관", "S관", "FRP"]
+LENS_CONFIRM_COLUMN = "렌즈 컨펌일"
+LIMIT_CONFIRM_COLUMN = "한도 컨펌일"
+LIMIT_BUILD_COLUMN = "한도 제작"
+LIMIT_READY_TOKENS = {"MIN", "MAX", "MIN+MAX"}
+DELAY_DATE_COLUMN = "납기 지연(발송일 변경)"
 
 def normalize_dia_value(value: str) -> str:
     text = str(value).replace("\\n", "\n").strip()
@@ -91,6 +99,24 @@ def canonical_select_key(column: str, text: str) -> str:
     return "".join(key.split()).lower()
 
 
+def parse_round_value(value) -> int:
+    if value is None:
+        return 0
+    text = str(value).strip()
+    if not text:
+        return 0
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if digits:
+        try:
+            return int(digits)
+        except ValueError:
+            pass
+    try:
+        return int(float(text))
+    except ValueError:
+        return 0
+
+
 def normalize_select_option(column: str, text: str) -> str | None:
     options = SELECT_COLUMN_OPTIONS.get(column)
     if not options:
@@ -108,12 +134,13 @@ def normalize_select_option(column: str, text: str) -> str | None:
 
 SELECT_COLUMN_OPTIONS = {
     "렌즈 구분": ["", "SPH", "TORIC", "프리즘"],
-    "샘플 구분": ["", "1D", "M", "ID"],
+    "샘플 구분": ["", "1D", "M"],
     "함수율": ["", "38%", "43%", "45%", "55%"],
     "DIA": ["", "14.2", "14.5", "14.2\n14.5"],
     "착용기간": ["", "1D", "M"],
-    "잉크 구분": ["", "액상", "파우더"],
+    "잉크 구분": ["", "액상", "파우더", "액상+파우더"],
     "제작 현황": ["", "대기", "진행중", "완료", "Drop"],
+    "샘플제작 공장위치": ["", "C관", "S관", "FRP", "미지정"],
 }
 STAGE_ORDER = ["대기", "진행중", "납기임박", "납기지연", "보류", "완료"]
 STAGE_COLORS = {
@@ -129,12 +156,14 @@ STAGE_COLORS = {
 def parse_date(value: str | datetime | pd.Timestamp | None) -> datetime | None:
     if value is None or value == "":
         return None
+    if pd.isna(value):
+        return None
     if isinstance(value, datetime):
         return value
     if isinstance(value, pd.Timestamp):
         return value.to_pydatetime()
     text = str(value).strip()
-    if not text or text.lower() in {"none", "nan", "null", "-"}:
+    if not text or text.lower() in {"none", "nan", "null", "-", "nat"}:
         return None
     for fmt in ("%y.%m.%d", "%Y.%m.%d", "%Y-%m-%d", "%y-%m-%d", "%Y/%m/%d"):
         try:
@@ -159,16 +188,11 @@ def determine_stage(row: pd.Series, today: datetime) -> str:
         return "완료"
     if "drop" in lowered or "보류" in raw:
         return "보류"
+    delay_date = parse_date(row.get(DELAY_DATE_COLUMN))
+    if delay_date is not None:
+        return "납기지연"
     if "진행" in raw:
         return "진행중"
-    due_date = parse_date(row.get("납기 요청일") or row.get("배송/예정일"))
-    if due_date is not None:
-        delta = (due_date - today).days
-        if delta < 0:
-            return "납기지연"
-        if delta <= 3:
-            return "납기임박"
-    return "진행중"
     due_date = parse_date(row.get("납기 요청일") or row.get("배송/예정일"))
     if due_date is not None:
         delta = (due_date - today).days
@@ -223,6 +247,169 @@ def inject_app_styles() -> None:
             st.markdown(f"<style>{css_path.read_text()}</style>", unsafe_allow_html=True)
         except Exception:
             pass
+
+
+def inject_scroll_persistence() -> None:
+    components.html(
+        """
+        <script>
+        (() => {
+          let hostWin = null;
+          let hostDoc = null;
+          try {
+            hostWin = window.parent;
+            hostDoc = hostWin.document;
+          } catch (err) {
+            return;
+          }
+          const NS = "sample-manager-scroll-v1";
+          const WIN_Y_KEY = NS + ":winY";
+          const WIN_X_KEY = NS + ":winX";
+          const TABLE_TOP_KEY = NS + ":tableTop";
+          const TABLE_LEFT_KEY = NS + ":tableLeft";
+
+          const saveWindowScroll = () => {
+            hostWin.sessionStorage.setItem(WIN_Y_KEY, String(hostWin.scrollY || 0));
+            hostWin.sessionStorage.setItem(WIN_X_KEY, String(hostWin.scrollX || 0));
+          };
+
+          const findTableRoots = () =>
+            Array.from(
+              hostDoc.querySelectorAll(
+                '[data-testid="stDataFrame"], [data-testid="stDataEditor"]'
+              )
+            );
+
+          const findScrollCandidates = () => {
+            const roots = findTableRoots();
+            if (!roots.length) {
+              return [];
+            }
+
+            const all = [];
+            for (const root of roots) {
+              all.push(root);
+              all.push(...Array.from(root.querySelectorAll("div")));
+            }
+
+            const unique = Array.from(new Set(all));
+            return unique.filter((el) => {
+              const scrollY = el.scrollHeight - el.clientHeight;
+              const scrollX = el.scrollWidth - el.clientWidth;
+              if (scrollY <= 8 && scrollX <= 8) {
+                return false;
+              }
+              if (el.clientHeight < 40 || el.clientWidth < 80) {
+                return false;
+              }
+              return true;
+            });
+          };
+
+          const pickPrimaryScroller = (candidates) => {
+            if (!candidates.length) {
+              return null;
+            }
+            const ranked = [...candidates].sort((a, b) => {
+              const aScore =
+                (a.scrollHeight - a.clientHeight) +
+                (a.scrollWidth - a.clientWidth);
+              const bScore =
+                (b.scrollHeight - b.clientHeight) +
+                (b.scrollWidth - b.clientWidth);
+              return bScore - aScore;
+            });
+            return ranked[0];
+          };
+
+          const saveTableScrollFrom = (scroller) => {
+            if (!scroller) {
+              return;
+            }
+            hostWin.sessionStorage.setItem(
+              TABLE_TOP_KEY,
+              String(scroller.scrollTop || 0)
+            );
+            hostWin.sessionStorage.setItem(
+              TABLE_LEFT_KEY,
+              String(scroller.scrollLeft || 0)
+            );
+          };
+
+          const bindTableScrollSaver = () => {
+            const candidates = findScrollCandidates();
+            if (!candidates.length) {
+              return false;
+            }
+
+            for (const scroller of candidates) {
+              if (scroller.dataset.scrollBound) {
+                continue;
+              }
+              scroller.addEventListener(
+                "scroll",
+                () => saveTableScrollFrom(scroller),
+                { passive: true }
+              );
+              scroller.dataset.scrollBound = "1";
+            }
+            return true;
+          };
+
+          const restoreWindowScroll = () => {
+            const y = Number(hostWin.sessionStorage.getItem(WIN_Y_KEY) || "0");
+            const x = Number(hostWin.sessionStorage.getItem(WIN_X_KEY) || "0");
+            if (!Number.isNaN(y) || !Number.isNaN(x)) {
+              hostWin.scrollTo(Number.isNaN(x) ? 0 : x, Number.isNaN(y) ? 0 : y);
+            }
+          };
+
+          const restoreTableScroll = () => {
+            const candidates = findScrollCandidates();
+            const scroller = pickPrimaryScroller(candidates);
+            if (!scroller) {
+              return false;
+            }
+            const top = Number(hostWin.sessionStorage.getItem(TABLE_TOP_KEY) || "0");
+            const left = Number(hostWin.sessionStorage.getItem(TABLE_LEFT_KEY) || "0");
+            if (!Number.isNaN(top)) {
+              scroller.scrollTop = top;
+            }
+            if (!Number.isNaN(left)) {
+              scroller.scrollLeft = left;
+            }
+            return true;
+          };
+
+          const saveAllScrolls = () => {
+            saveWindowScroll();
+            const scroller = pickPrimaryScroller(findScrollCandidates());
+            saveTableScrollFrom(scroller);
+          };
+
+          if (!hostWin.__sampleManagerScrollBound) {
+            hostWin.addEventListener("scroll", saveWindowScroll, { passive: true });
+            hostWin.addEventListener("beforeunload", saveAllScrolls);
+            hostDoc.addEventListener("pointerdown", saveAllScrolls, true);
+            hostDoc.addEventListener("keydown", saveAllScrolls, true);
+            hostWin.__sampleManagerScrollBound = true;
+          }
+
+          let tries = 0;
+          const timer = hostWin.setInterval(() => {
+            tries += 1;
+            restoreWindowScroll();
+            const bound = bindTableScrollSaver();
+            const restored = restoreTableScroll();
+            if ((bound && restored) || tries > 50) {
+              hostWin.clearInterval(timer);
+            }
+          }, 120);
+        })();
+        </script>
+        """,
+        height=0,
+    )
 
 
 def remember_last_file(path: Path) -> None:
@@ -467,6 +654,49 @@ def get_location_series(df: pd.DataFrame) -> pd.Series:
     return pd.Series(["미지정"] * len(df), index=df.index)
 
 
+def normalize_limit_token(value: str | None) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "null", "nan", "-"}:
+        return ""
+    simplified = text.upper().replace(" ", "")
+    simplified = simplified.replace("/", "+")
+    if simplified in {"MINMAX", "MAXMIN"}:
+        simplified = "MIN+MAX"
+    if simplified in LIMIT_READY_TOKENS:
+        return simplified
+    if "MIN" in simplified and "MAX" in simplified:
+        return "MIN+MAX"
+    if "MIN" in simplified:
+        return "MIN"
+    if "MAX" in simplified:
+        return "MAX"
+    return text
+
+
+def analyze_limit_entry(value: str | None) -> tuple[bool, str, str]:
+    normalized = normalize_limit_token(value)
+    has_min = "MIN" in normalized
+    has_max = "MAX" in normalized
+    ready = bool(normalized) and (has_min or has_max)
+    if has_min and has_max:
+        display = "MIN + MAX"
+    elif has_min:
+        display = "MIN"
+    elif has_max:
+        display = "MAX"
+    else:
+        display = value.strip() if isinstance(value, str) else (str(value).strip() if value else "-")
+    missing: list[str] = []
+    if not has_min:
+        missing.append("MIN")
+    if not has_max:
+        missing.append("MAX")
+    missing_text = ", ".join(missing) + " 제작 필요" if missing else "완료"
+    return ready, display, missing_text
+
+
 def normalize_location_value(value: str | None) -> str:
     if value is None:
         return "미지정"
@@ -505,18 +735,39 @@ FILTER_PRESETS = {
 }
 
 
-DATE_FILTER_COLUMNS = [
-    "배송/예정일",
-    "납기 요청일",
-    "샘플 접수일",
+FILTER_DATE_COLUMN = "샘플 접수일"
+FILTER_DATE_CANDIDATES = [
+    FILTER_DATE_COLUMN,
+    "샘플 최초 접수일",
+    "샘플 (수정)접수일",
 ]
+PERIOD_LABEL_STYLE = """
+<style>
+.period-field-label {
+    font-size: 0.78rem;
+    color: #6b7280;
+    margin-bottom: 0.05rem;
+    line-height: 1;
+}
+</style>
+"""
 
 
-def get_filter_column(df: pd.DataFrame) -> str | None:
-    for column in DATE_FILTER_COLUMNS:
-        if column in df.columns:
-            return column
-    return None
+def get_filter_date_series(df: pd.DataFrame) -> pd.Series:
+    if df.empty:
+        return pd.Series([], index=df.index)
+    fallback: pd.Series | None = None
+    for column in FILTER_DATE_CANDIDATES:
+        if column not in df.columns:
+            continue
+        series = df[column].apply(parse_date)
+        if fallback is None:
+            fallback = series
+        if series.notna().any():
+            return series
+    if fallback is not None:
+        return fallback
+    return pd.Series([None] * len(df), index=df.index)
 
 
 def prepare_dashboard_data(
@@ -526,31 +777,364 @@ def prepare_dashboard_data(
 ) -> pd.DataFrame:
     if df.empty:
         return df
-    filter_column = get_filter_column(df)
-    if filter_column is None:
-        filtered = df.copy()
+    working = df.copy()
+    working = ensure_location_column(working)
+    working[LOCATION_COLUMN] = working[LOCATION_COLUMN].apply(normalize_location_value)
+    if working.empty:
+        working["__stage__"] = []
+        return working
+
+    stage_series = working.apply(lambda row: determine_stage(row, end_date), axis=1)
+    working.loc[:, "__stage__"] = stage_series.values
+
+    parsed_dates = get_filter_date_series(working)
+    working.loc[:, "__filter_date__"] = parsed_dates
+
+    date_mask = working["__filter_date__"].apply(
+        lambda dt: dt is None or start_date <= dt <= end_date
+    )
+    target = working[date_mask].copy()
+    target = target.drop(columns=["__filter_date__"])
+    target = target.reset_index(drop=True)
+    return target
+
+
+def prepare_limit_dashboard_data(
+    df: pd.DataFrame,
+    start_date: datetime,
+    end_date: datetime,
+) -> tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+]:
+    if df.empty:
+        empty = pd.DataFrame()
+        return empty, empty, empty, empty, empty, empty
+    working = df.copy()
+    if LIMIT_BUILD_COLUMN not in working.columns:
+        working[LIMIT_BUILD_COLUMN] = ""
+    working = ensure_location_column(working)
+    working[LOCATION_COLUMN] = working[LOCATION_COLUMN].apply(normalize_location_value)
+
+    sample_dates = get_filter_date_series(working)
+    working.loc[:, "__sample_date__"] = sample_dates
+
+    if "차수" in working.columns:
+        rounds = working["차수"].apply(parse_round_value)
     else:
-        parsed = df[filter_column].apply(parse_date)
-        df = df.copy()
-        df["__parsed_date__"] = parsed
-        filtered = df[
-            df["__parsed_date__"].apply(
-                lambda dt: dt is None or start_date <= dt <= end_date
-            )
-        ].copy()
-    filtered = filtered.reset_index(drop=True)
-    filtered = ensure_location_column(filtered)
-    filtered[LOCATION_COLUMN] = filtered[LOCATION_COLUMN].apply(normalize_location_value)
-    if not filtered.empty:
-        stage_series = filtered.apply(
-            lambda row: determine_stage(row, end_date), axis=1
-        )
-        filtered.loc[:, "__stage__"] = stage_series.values
+        rounds = pd.Series([0] * len(working))
+    working.loc[:, "__round__"] = rounds
+
+    eligible_mask = working["__round__"] >= 3
+    date_mask = working["__sample_date__"].apply(
+        lambda dt: dt is None or start_date <= dt <= end_date
+    )
+    table = working[date_mask].copy()
+    if table.empty:
+        empty = pd.DataFrame()
+        return empty, empty, empty, empty, empty, empty
+
+    analysis = pd.DataFrame(
+        table[LIMIT_BUILD_COLUMN].apply(analyze_limit_entry).tolist(),
+        columns=["__limit_ready__", "__limit_display__", "__limit_missing__"],
+        index=table.index,
+    )
+    table = pd.concat([table, analysis], axis=1)
+
+    if LENS_CONFIRM_COLUMN in table.columns:
+        lens_dates = table[LENS_CONFIRM_COLUMN].apply(parse_date)
     else:
-        filtered["__stage__"] = []
-    if "__parsed_date__" in filtered.columns:
-        filtered = filtered.drop(columns=["__parsed_date__"])
-    return filtered
+        lens_dates = pd.Series([None] * len(table), index=table.index)
+    table.loc[:, "__lens_date__"] = lens_dates
+    table.loc[:, "__lens_confirmed__"] = lens_dates.notna()
+
+    if LIMIT_CONFIRM_COLUMN in table.columns:
+        limit_confirm_dates = table[LIMIT_CONFIRM_COLUMN].apply(parse_date)
+    else:
+        limit_confirm_dates = pd.Series([None] * len(table), index=table.index)
+    table.loc[:, "__limit_confirm_date__"] = limit_confirm_dates
+
+    table = table.sort_values(
+        by=["__lens_confirmed__", "__sample_date__"],
+        ascending=[False, False],
+    )
+    ready_all = table[table["__limit_ready__"]].copy()
+    confirmed_all = ready_all[ready_all["__lens_confirmed__"]].copy()
+    pending_all = table[~table["__limit_ready__"]].copy()
+
+    eligible_table = table[eligible_mask.loc[table.index]].copy()
+    ready_eligible = ready_all.loc[ready_all.index.intersection(eligible_table.index)]
+    confirmed_eligible = confirmed_all.loc[
+        confirmed_all.index.intersection(eligible_table.index)
+    ]
+    pending_eligible = pending_all.loc[
+        pending_all.index.intersection(eligible_table.index)
+    ]
+    return (
+        confirmed_eligible,
+        ready_eligible,
+        pending_eligible,
+        confirmed_all,
+        ready_all,
+        pending_all,
+    )
+
+
+def build_limit_view_table(
+    df: pd.DataFrame,
+    *,
+    date_column: str = "__lens_date__",
+    date_label: str = "렌즈 컨펌일",
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+    base_index = df.index
+
+    def pick(column: str) -> pd.Series:
+        return df.get(column, pd.Series([""] * len(df), index=base_index))
+
+    raw_dates = df.get(date_column, pd.Series([""] * len(df), index=base_index))
+    formatted_dates = []
+    for value in raw_dates:
+        if value is None or pd.isna(value):
+            formatted_dates.append("-")
+        elif isinstance(value, pd.Timestamp):
+            if pd.isna(value):
+                formatted_dates.append("-")
+            else:
+                formatted_dates.append(value.strftime("%Y-%m-%d"))
+        elif isinstance(value, datetime):
+            formatted_dates.append(value.strftime("%Y-%m-%d"))
+        elif str(value).strip() == "":
+            formatted_dates.append("-")
+        else:
+            parsed = pd.to_datetime(value, errors="coerce")
+            if pd.isna(parsed):
+                formatted_dates.append("-")
+            else:
+                formatted_dates.append(parsed.strftime("%Y-%m-%d"))
+    formatted_dates = pd.Series(formatted_dates, index=base_index)
+
+    view = pd.DataFrame(
+        {
+            date_label: formatted_dates,
+            "국가": pick("국가"),
+            "고객사": pick("고객사"),
+            "품명": pick("품명"),
+            "샘플 구분": pick("샘플 구분"),
+            "차수": pick("차수"),
+            "한도 제작": df["__limit_display__"],
+            "필요 작업": df["__limit_missing__"],
+            "비고": pick("비고"),
+        }
+    )
+    return view.fillna("")
+
+
+def list_available_years(today: datetime) -> list[int]:
+    years = {today.year}
+    df = st.session_state.get("df")
+    if isinstance(df, pd.DataFrame) and not df.empty:
+        parsed = get_filter_date_series(df)
+        for dt in parsed:
+            if isinstance(dt, datetime):
+                years.add(dt.year)
+    return sorted(years, reverse=True)
+
+
+def advance_month(year: int, month: int, months: int) -> tuple[int, int]:
+    total = year * 12 + (month - 1) + months
+    new_year = total // 12
+    new_month = total % 12 + 1
+    return new_year, new_month
+
+
+def build_period_bounds(year: int, start_month: int, months: int) -> tuple[datetime, datetime]:
+    start = datetime(year, start_month, 1)
+    end_year, end_month = advance_month(year, start_month, months)
+    next_period_start = datetime(end_year, end_month, 1)
+    end = next_period_start - timedelta(seconds=1)
+    return start, end
+
+
+def render_month_selector(
+    today: datetime,
+    key_prefix: str,
+    year_col,
+    month_col,
+) -> tuple[datetime, datetime]:
+    ensure_period_label_style()
+    render_period_field_label(year_col, "년도")
+    years = list_available_years(today)
+    year_index = years.index(today.year) if today.year in years else 0
+    selected_year = year_col.selectbox(
+        "년도",
+        years,
+        index=year_index,
+        key=f"{key_prefix}_month_year",
+        label_visibility="collapsed",
+    )
+    render_period_field_label(month_col, "월")
+    month_options = list(range(1, 13))
+    month_index = max(0, min(len(month_options) - 1, today.month - 1))
+    selected_month = month_col.selectbox(
+        "월",
+        month_options,
+        index=month_index,
+        format_func=lambda value: f"{value}월",
+        key=f"{key_prefix}_month_value",
+        label_visibility="collapsed",
+    )
+    return build_period_bounds(selected_year, selected_month, 1)
+
+
+def render_quarter_selector(
+    today: datetime,
+    key_prefix: str,
+    year_col,
+    quarter_col,
+) -> tuple[datetime, datetime]:
+    ensure_period_label_style()
+    render_period_field_label(year_col, "년도")
+    years = list_available_years(today)
+    year_index = years.index(today.year) if today.year in years else 0
+    selected_year = year_col.selectbox(
+        "년도",
+        years,
+        index=year_index,
+        key=f"{key_prefix}_quarter_year",
+        label_visibility="collapsed",
+    )
+    render_period_field_label(quarter_col, "분기")
+    quarter_options = [1, 2, 3, 4]
+    current_quarter = ((today.month - 1) // 3) + 1
+    quarter_index = quarter_options.index(current_quarter)
+    selected_quarter = quarter_col.selectbox(
+        "분기",
+        quarter_options,
+        index=quarter_index,
+        format_func=lambda value: f"{value}분기",
+        key=f"{key_prefix}_quarter_value",
+        label_visibility="collapsed",
+    )
+    start_month = (selected_quarter - 1) * 3 + 1
+    return build_period_bounds(selected_year, start_month, 3)
+
+
+def render_half_selector(
+    today: datetime,
+    key_prefix: str,
+    year_col,
+    half_col,
+) -> tuple[datetime, datetime]:
+    ensure_period_label_style()
+    render_period_field_label(year_col, "년도")
+    years = list_available_years(today)
+    year_index = years.index(today.year) if today.year in years else 0
+    selected_year = year_col.selectbox(
+        "년도",
+        years,
+        index=year_index,
+        key=f"{key_prefix}_half_year",
+        label_visibility="collapsed",
+    )
+    render_period_field_label(half_col, "반기")
+    half_options = [1, 2]
+    current_half = 1 if today.month <= 6 else 2
+    half_index = current_half - 1
+    selected_half = half_col.selectbox(
+        "반기",
+        half_options,
+        index=half_index,
+        format_func=lambda value: "상반기" if value == 1 else "하반기",
+        key=f"{key_prefix}_half_value",
+        label_visibility="collapsed",
+    )
+    start_month = 1 if selected_half == 1 else 7
+    return build_period_bounds(selected_year, start_month, 6)
+
+
+def render_year_selector(
+    today: datetime,
+    key_prefix: str,
+    year_col,
+) -> tuple[datetime, datetime]:
+    ensure_period_label_style()
+    render_period_field_label(year_col, "년도")
+    years = list_available_years(today)
+    year_index = years.index(today.year) if today.year in years else 0
+    selected_year = year_col.selectbox(
+        "년도",
+        years,
+        index=year_index,
+        key=f"{key_prefix}_year_value",
+        label_visibility="collapsed",
+    )
+    return build_period_bounds(selected_year, 1, 12)
+
+
+def render_period_field_label(target, text: str) -> None:
+    target.markdown(
+        f"<div class='period-field-label'>{text}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def ensure_period_label_style() -> None:
+    if not st.session_state.get("__period_label_style", False):
+        st.markdown(PERIOD_LABEL_STYLE, unsafe_allow_html=True)
+        st.session_state["__period_label_style"] = True
+
+
+def sync_manual_period_inputs(
+    key_prefix: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    start_col,
+    end_col,
+) -> tuple[datetime, datetime]:
+    ensure_period_label_style()
+    start_key = f"{key_prefix}_start"
+    end_key = f"{key_prefix}_end"
+    signature_key = f"{key_prefix}_auto_sig"
+    start_date = start_dt.date()
+    end_date = end_dt.date()
+    signature = f"{start_date.isoformat()}|{end_date.isoformat()}"
+
+    if start_key not in st.session_state:
+        st.session_state[start_key] = start_date
+    if end_key not in st.session_state:
+        st.session_state[end_key] = end_date
+
+    if st.session_state.get(signature_key) != signature:
+        st.session_state[start_key] = start_date
+        st.session_state[end_key] = end_date
+        st.session_state[signature_key] = signature
+
+    render_period_field_label(start_col, "시작일")
+    manual_start = start_col.date_input(
+        "시작일",
+        value=st.session_state[start_key],
+        key=start_key,
+        label_visibility="collapsed",
+    )
+    render_period_field_label(end_col, "종료일")
+    manual_end = end_col.date_input(
+        "종료일",
+        value=st.session_state[end_key],
+        key=end_key,
+        label_visibility="collapsed",
+    )
+    if manual_start > manual_end:
+        st.warning("시작일이 종료일보다 클 수 없습니다.")
+        st.stop()
+    manual_start_dt = datetime.combine(manual_start, datetime.min.time())
+    manual_end_dt = datetime.combine(manual_end, datetime.max.time())
+    return manual_start_dt, manual_end_dt
 
 
 def render_period_selector(
@@ -566,27 +1150,37 @@ def render_period_selector(
         key=f"{key_prefix}_period",
     )
     preset_start, preset_end = FILTER_PRESETS[period_choice](today)
-    if period_choice in {"월별", "분기별", "반기별", "년도별"}:
+    ranged_periods = {"월별", "분기별", "반기별", "년도별"}
+    if period_choice in ranged_periods:
         expander_col, _ = st.columns([1.5, 2])
-        with expander_col.expander("기간 선택", expanded=False):
-            col_a, col_b = st.columns(2)
-            preset_start = col_a.date_input(
-                "시작일",
-                value=preset_start.date(),
-                max_value=today.date(),
-                key=f"{key_prefix}_start",
+        with expander_col.expander("기간 선택", expanded=True):
+            if period_choice == "년도별":
+                col_year, col_start, col_end = st.columns([1, 1.3, 1.3])
+                preset_start, preset_end = render_year_selector(
+                    today, key_prefix, col_year
+                )
+            else:
+                col_year, col_period, col_start, col_end = st.columns([1, 1, 1.3, 1.3])
+                if period_choice == "월별":
+                    preset_start, preset_end = render_month_selector(
+                        today, key_prefix, col_year, col_period
+                    )
+                elif period_choice == "분기별":
+                    preset_start, preset_end = render_quarter_selector(
+                        today, key_prefix, col_year, col_period
+                    )
+                else:
+                    preset_start, preset_end = render_half_selector(
+                        today, key_prefix, col_year, col_period
+                    )
+
+            preset_start, preset_end = sync_manual_period_inputs(
+                key_prefix,
+                preset_start,
+                preset_end,
+                col_start,
+                col_end,
             )
-            preset_end = col_b.date_input(
-                "종료일",
-                value=preset_end.date(),
-                max_value=today.date(),
-                key=f"{key_prefix}_end",
-            )
-            if preset_start > preset_end:
-                st.warning("시작일이 종료일보다 클 수 없습니다.")
-                st.stop()
-            preset_start = datetime.combine(preset_start, datetime.min.time())
-            preset_end = datetime.combine(preset_end, datetime.max.time())
     return period_choice, preset_start, preset_end
 
 
@@ -599,7 +1193,13 @@ def normalize_query_value(value, default: str) -> str:
 
 
 def set_query_params(**kwargs: str) -> None:
-    st.query_params = {k: v for k, v in kwargs.items() if v is not None}
+    target = {k: str(v) for k, v in kwargs.items() if v is not None}
+    current = {
+        key: normalize_query_value(st.query_params.get(key), "")
+        for key in st.query_params.keys()
+    }
+    if current != target:
+        st.query_params = target
 
 
 def build_location_stage_summary(df: pd.DataFrame) -> OrderedDict[str, dict[str, int]]:
@@ -677,6 +1277,31 @@ def render_chart_card(
     chart_height: int | None = None,
     card_width: int = 560,
 ) -> None:
+    base_size = 12
+    if fig.layout.font and fig.layout.font.size:
+        try:
+            base_size = int(fig.layout.font.size)
+        except (TypeError, ValueError):
+            base_size = 12
+    target_size = max(12, base_size + 1)
+
+    fig.update_layout(
+        font=dict(
+            size=target_size,
+            color="#1f2937",
+            family="Pretendard Variable, Noto Sans KR, Segoe UI, sans-serif",
+        )
+    )
+    fig.update_xaxes(
+        tickfont=dict(size=target_size, color="#1f2937"),
+        title_font=dict(size=target_size + 1, color="#1f2937"),
+    )
+    fig.update_yaxes(
+        tickfont=dict(size=target_size, color="#1f2937"),
+        title_font=dict(size=target_size + 1, color="#1f2937"),
+    )
+    fig.update_annotations(font=dict(size=target_size + 1, color="#1f2937"))
+
     width = chart_width or fig.layout.width or 420
     height = chart_height or fig.layout.height or 360
     fig.update_layout(width=width, height=height, margin=dict(t=20, b=20, l=10, r=10))
@@ -722,37 +1347,141 @@ def render_chart_card(
         card_html,
         height=int(fig.layout.height or 400) + (60 if title else 40),
         scrolling=False,
+        width=card_width,
+    )
+
+
+def pick_first_valid_date(row: pd.Series, columns: list[str]) -> datetime | None:
+    for column in columns:
+        if column not in row:
+            continue
+        dt = parse_date(row.get(column))
+        if dt is not None:
+            return dt
+    return None
+
+
+def build_duration_entries(df: pd.DataFrame) -> list[dict]:
+    design_to_ship: list[dict] = []
+    for _, row in df.iterrows():
+        customer = str(row.get("고객사") or "").strip()
+        product = str(row.get("품명") or "").strip()
+        country = str(row.get("국가") or "").strip()
+        label_parts = [country, customer]
+        if product:
+            label_parts.append(product)
+        label = " / ".join(part for part in label_parts if part) or "이름 없음"
+
+        start_design = pick_first_valid_date(row, ["시안 컨펌일"])
+        shipment_candidates = [
+            pick_first_valid_date(row, ["발송 예정일"]),
+            pick_first_valid_date(row, [DELAY_DATE_COLUMN]),
+        ]
+        shipment_dates = [dt for dt in shipment_candidates if dt is not None]
+        end_ship = max(shipment_dates) if shipment_dates else None
+        if start_design and end_ship and end_ship >= start_design:
+            design_to_ship.append(
+                {
+                    "label": label,
+                    "start": start_design,
+                    "end": end_ship,
+                    "days": max((end_ship - start_design).days, 0),
+                }
+            )
+    return design_to_ship
+
+
+def render_duration_trend_chart(
+    shipment_entries: list[dict],
+    *,
+    width: int = 760,
+    card_width: int | None = None,
+) -> None:
+    if not shipment_entries:
+        st.info("소요일 정보를 계산할 데이터가 없습니다.")
+        return
+
+    fig = go.Figure()
+
+    df = pd.DataFrame(shipment_entries)
+    df["start"] = pd.to_datetime(df["start"])
+    df["end"] = pd.to_datetime(df["end"])
+    df = df.sort_values("start")
+    fig.add_trace(
+        go.Scatter(
+            x=df["start"],
+            y=df["days"],
+            mode="lines+markers+text",
+            text=[f"<b>{int(day)}일</b>" for day in df["days"]],
+            textposition="top center",
+            textfont=dict(size=13),
+            line=dict(color="#e36c5c", width=3),
+            marker=dict(size=8, color="#e36c5c"),
+            hovertemplate=(
+                "%{text}<br>"
+                "시안 컨펌: %{x|%Y-%m-%d}<br>"
+                "발송: %{customdata}<extra></extra>"
+            ),
+            customdata=df["end"].dt.strftime("%Y-%m-%d"),
+            name="시안 컨펌→발송",
+        )
+    )
+
+    fig.update_layout(
+        height=320,
+        margin=dict(l=70, r=40, t=30, b=60),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        yaxis_title=dict(text="소요일 (일)", standoff=25),
+        xaxis_title=dict(text="일정", standoff=30),
+        yaxis=dict(
+            gridcolor="#e5e7eb",
+            tickfont=dict(size=10),
+            ticklabelposition="outside",
+            automargin=True,
+        ),
+        xaxis=dict(
+            showgrid=True,
+            gridcolor="#f1f5f9",
+            tickformat="%b %Y",
+            tickfont=dict(size=10),
+            tickangle=-20,
+            ticklabelposition="outside",
+            automargin=True,
+        ),
+    )
+
+    render_chart_card(
+        fig,
+        title="샘플 제작 소요일 추이",
+        chart_width=width,
+        chart_height=360,
+        card_width=card_width or width,
     )
 
 
 def render_sample_dashboard() -> None:
     st.markdown(
         """
-        <style>
-        .block-container {
-            padding-top: 1rem;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        """
-        <div style="display:flex; flex-direction:column; gap:0.4rem; margin-bottom:1.2rem;">
-            <div style="font-size:2.2rem; font-weight:800; color:#1f2937;">샘플 진행 현황</div>
+        <div class="page-hero">
+            <div class="page-hero-title">샘플 진행 현황</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
     today = datetime.now()
-    st.caption(f"{today:%Y년 %m월 %d일 %H:%M 기준}")
+    st.markdown(
+        f"<p class='page-caption'>{today:%Y년 %m월 %d일 %H:%M 기준}</p>",
+        unsafe_allow_html=True,
+    )
     _, preset_start, preset_end = render_period_selector(today, "main")
 
     target_df = prepare_dashboard_data(
         st.session_state.df, preset_start, preset_end
     )
-    period_text = f"{preset_start:%Y년 %m월 %d일} ~ {preset_end:%Y년 %m월 %d일} 데이터 기준"
+    period_text = (
+        f"{preset_start:%Y년 %m월 %d일} ~ {preset_end:%Y년 %m월 %d일} "
+        "샘플 접수일 기준"
+    )
     if target_df.empty:
         st.info("해당 기간에 등록된 샘플이 없습니다.")
         return
@@ -770,7 +1499,8 @@ def render_sample_dashboard() -> None:
             "color": [STAGE_COLORS.get(stage, "#cccccc") for stage in stage_counts.index],
         }
     )
-    summary_df["display_value"] = summary_df["count"].replace(0, 0.0001)
+    pie_df = summary_df[summary_df["count"] > 0].copy()
+    total_count = int(stage_counts.sum())
 
     left_col, right_col = st.columns([1.2, 1])
     with left_col:
@@ -780,8 +1510,8 @@ def render_sample_dashboard() -> None:
             unsafe_allow_html=True,
         )
         fig = px.pie(
-            summary_df,
-            values="display_value",
+            pie_df,
+            values="count",
             names="stage",
             color="stage",
             category_orders={"stage": STAGE_ORDER},
@@ -792,10 +1522,18 @@ def render_sample_dashboard() -> None:
             showlegend=False,
         )
         fig.update_traces(
-            text=summary_df["count"],
-            textinfo="text",
+            texttemplate="<b>%{label}</b><br><b>%{value}건</b>",
+            textposition="inside",
+            textfont=dict(size=12),
             hole=0.35,
-            hovertemplate="%{label}: %{text}건",
+            hovertemplate="%{label}: %{value}건<extra></extra>",
+        )
+        fig.add_annotation(
+            text=f"<b>총 {total_count}건</b>",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+            font=dict(size=16, color="#334155"),
         )
         render_chart_card(fig)
         legend_html = "".join(
@@ -854,17 +1592,22 @@ def render_factory_detail_page(factory_name: str) -> None:
     today = datetime.now()
     st.markdown(
         f"""
-        <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:0.6rem;">
-            <div>
-                <div style="font-size:2rem;font-weight:800;color:#1f2937;">샘플 진행 현황 - {factory_name}</div>
-                <div style="color:#6b7280;">{today:%Y년 %m월 %d일 %H:%M 기준}</div>
-            </div>
+        <div class="page-hero">
+            <div class="page-hero-title">샘플 진행 현황 - {factory_name}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    st.markdown(
+        f"<p class='page-caption'>{today:%Y년 %m월 %d일 %H:%M 기준}</p>",
+        unsafe_allow_html=True,
+    )
     _, preset_start, preset_end = render_period_selector(today, f"factory_{factory_name}")
-    st.caption(f"{preset_start:%Y년 %m월 %d일} ~ {preset_end:%Y년 %m월 %d일} 데이터 기준")
+    st.markdown(
+        f"<p class='page-caption'>{preset_start:%Y년 %m월 %d일} ~ {preset_end:%Y년 %m월 %d일} "
+        "샘플 접수일 기준</p>",
+        unsafe_allow_html=True,
+    )
 
     target_df = prepare_dashboard_data(
         st.session_state.df, preset_start, preset_end
@@ -878,39 +1621,76 @@ def render_factory_detail_page(factory_name: str) -> None:
         target_df["__stage__"].value_counts().reindex(STAGE_ORDER, fill_value=0)
     )
 
-    fig = go.Figure()
-    for stage in STAGE_ORDER:
-        value = stage_counts[stage]
-        if not value:
-            continue
-        fig.add_trace(
-            go.Bar(
-                y=[factory_name],
-                x=[value],
-                name=stage,
-                orientation="h",
-                marker_color=STAGE_COLORS.get(stage, "#d1d5db"),
-                hovertemplate=f"{stage}: %{{x}}건<extra></extra>",
-            )
+    chart_col1, chart_col2 = st.columns(2)
+    with chart_col1:
+        stage_chart_df = pd.DataFrame(
+            {
+                "stage": STAGE_ORDER,
+                "count": [int(stage_counts[stage]) for stage in STAGE_ORDER],
+            }
         )
-    fig.update_layout(
-        barmode="stack",
-        height=140,
-        margin=dict(l=10, r=10, t=10, b=10),
-        showlegend=False,
-    )
-    fig.update_yaxes(visible=False)
-    fig.update_xaxes(visible=False)
-    render_chart_card(fig, chart_width=560, chart_height=200, card_width=560)
+        stage_chart_df["label"] = stage_chart_df["count"].apply(
+            lambda value: f"{value}건" if value > 0 else ""
+        )
+        fig = px.bar(
+            stage_chart_df,
+            x="stage",
+            y="count",
+            color="stage",
+            text="label",
+            category_orders={"stage": STAGE_ORDER},
+            color_discrete_map=STAGE_COLORS,
+        )
+        fig.update_traces(
+            texttemplate="<b>%{text}</b>",
+            textposition="outside",
+            textfont=dict(size=12),
+            cliponaxis=False,
+            hovertemplate="%{x}: %{y}건<extra></extra>",
+        )
+        fig.update_layout(
+            height=320,
+            margin=dict(l=24, r=12, t=20, b=56),
+            showlegend=False,
+            bargap=0.35,
+            xaxis_title=None,
+            yaxis_title=None,
+            xaxis=dict(
+                tickangle=0,
+                tickfont=dict(size=11),
+                automargin=True,
+            ),
+            yaxis=dict(
+                rangemode="tozero",
+                dtick=1,
+                tickfont=dict(size=11),
+                automargin=True,
+            ),
+        )
+        render_chart_card(
+            fig,
+            title=f"{factory_name} 단계별 현황",
+            chart_width=560,
+            chart_height=320,
+            card_width=600,
+        )
 
-    legend_html = "".join(
-        f"<span><span class='legend-dot' style='background:{STAGE_COLORS.get(stage, '#d1d5db')}'></span>{stage} {int(stage_counts[stage])}건</span>"
-        for stage in STAGE_ORDER
-    )
-    st.markdown(
-        f"<div class='status-legend'>{legend_html}</div>",
-        unsafe_allow_html=True,
-    )
+        legend_html = "".join(
+            f"<span><span class='legend-dot' style='background:{STAGE_COLORS.get(stage, '#d1d5db')}'></span>{stage} {int(stage_counts[stage])}건</span>"
+            for stage in STAGE_ORDER
+        )
+        st.markdown(
+            f"<div class='status-legend'>{legend_html}</div>",
+            unsafe_allow_html=True,
+        )
+
+    with chart_col2:
+        shipment_entries = build_duration_entries(target_df)
+        render_duration_trend_chart(
+            shipment_entries,
+            width=480,
+            card_width=600,
+        )
 
     detail_df = target_df.drop(columns=["__stage__"])
     st.dataframe(
@@ -921,8 +1701,105 @@ def render_factory_detail_page(factory_name: str) -> None:
 
 
 def render_limit_dashboard() -> None:
-    st.title("한도 제작 현황")
-    st.info("한도 제작 대시보드는 추후 구현 예정입니다.")
+    set_query_params(view="limit")
+    st.markdown(
+        """
+        <div class="page-hero">
+            <div class="page-hero-title">한도 제작 현황</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    today = datetime.now()
+    st.markdown(
+        f"<p class='page-caption'>{today:%Y년 %m월 %d일 %H:%M 기준}</p>",
+        unsafe_allow_html=True,
+    )
+    _, preset_start, preset_end = render_period_selector(today, "limit")
+
+    (
+        eligible_confirmed,
+        eligible_ready,
+        eligible_pending,
+        confirmed_df,
+        ready_df,
+        pending_df,
+    ) = prepare_limit_dashboard_data(
+        st.session_state.df, preset_start, preset_end
+    )
+    st.markdown(
+        f"<p class='page-caption'>{preset_start:%Y년 %m월 %d일} ~ {preset_end:%Y년 %m월 %d일} "
+        "3차 이상 샘플 기준 (컨펌 등록 시 완료로 집계)</p>",
+        unsafe_allow_html=True,
+    )
+
+    if confirmed_df.empty and ready_df.empty and pending_df.empty:
+        st.info("선택한 기간에 관리할 한도 정보가 없습니다.")
+        return
+
+    confirmed_count = len(eligible_confirmed)
+    eligible_ready_only = eligible_ready.drop(
+        index=eligible_confirmed.index, errors="ignore"
+    )
+    ready_only = ready_df.drop(index=confirmed_df.index, errors="ignore")
+    ready_count = len(eligible_ready_only)
+    pending_count = len(eligible_pending)
+
+    metrics_html = f"""
+    <div class="limit-summary">
+        <div class="limit-metric">
+            <h4>컨펌 완료</h4>
+            <strong>{confirmed_count}</strong><span style="margin-left:0.3rem;">건</span>
+        </div>
+        <div class="limit-metric">
+            <h4>바로 발송 가능</h4>
+            <strong>{ready_count}</strong><span style="margin-left:0.3rem;">건</span>
+        </div>
+        <div class="limit-metric">
+            <h4>제작 필요</h4>
+            <strong>{pending_count}</strong><span style="margin-left:0.3rem;">건</span>
+        </div>
+    </div>
+    """
+    st.markdown(metrics_html, unsafe_allow_html=True)
+
+    ready_table = build_limit_view_table(ready_only)
+    pending_table = build_limit_view_table(pending_df)
+    confirmed_table = build_limit_view_table(
+        confirmed_df,
+        date_column="__limit_confirm_date__",
+        date_label="한도 컨펌일",
+    )
+
+    st.subheader("한도 컨펌 완료 (시양산 대상)")
+    if confirmed_table.empty:
+        st.info("컨펌 완료된 한도 정보가 없습니다.")
+    else:
+        st.dataframe(
+            confirmed_table,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.subheader("바로 발송 가능한 한도")
+    if ready_table.empty:
+        st.info("사전 제작된 한도가 없습니다.")
+    else:
+        st.dataframe(
+            ready_table,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.subheader("제작이 필요한 한도")
+    if pending_table.empty:
+        st.success("모든 제품의 한도 제작이 완료되었습니다.")
+    else:
+        st.dataframe(
+            pending_table,
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
 def snapshot_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -995,24 +1872,28 @@ def delete_column(target: str) -> None:
     persist_dataframe()
 
 
-def add_row() -> None:
+def add_row(count: int = 1) -> None:
+    count = max(1, int(count))
     if st.session_state.df.empty:
         st.session_state.df = pd.DataFrame(columns=list(DEFAULT_ROW.keys()))
     empty_row = {col: "" for col in st.session_state.df.columns}
+    new_rows = pd.DataFrame([empty_row] * count)
     st.session_state.df = pd.concat(
-        [st.session_state.df, pd.DataFrame([empty_row])],
+        [st.session_state.df, new_rows],
         ignore_index=True,
     )
-    st.session_state.status = "빈 행을 추가했습니다."
+    st.session_state.status = f"빈 행 {count}개를 추가했습니다."
     persist_dataframe()
 
 
-def delete_last_row() -> None:
+def delete_last_row(count: int = 1) -> None:
+    count = max(1, int(count))
     if st.session_state.df.empty:
         st.info("삭제할 행이 없습니다.")
         return
-    st.session_state.df = st.session_state.df.iloc[:-1].reset_index(drop=True)
-    st.session_state.status = "마지막 행을 삭제했습니다."
+    delete_count = min(count, len(st.session_state.df))
+    st.session_state.df = st.session_state.df.iloc[:-delete_count].reset_index(drop=True)
+    st.session_state.status = f"마지막 행 {delete_count}개를 삭제했습니다."
     persist_dataframe()
 
 
@@ -1106,6 +1987,8 @@ def handle_table_edit() -> None:
 
 
 def render_admin_page() -> None:
+    inject_scroll_persistence()
+    should_scroll_to_table = bool(st.session_state.get(SCROLL_TO_TABLE_FLAG, False))
     st.title("샘플 리스트 관리자")
     st.caption("CSV/엑셀을 불러와 열과 행을 자유롭게 조정하고 다시 저장해 보세요.")
 
@@ -1226,8 +2109,72 @@ def render_admin_page() -> None:
     row_controls = st.container()
     history_controls = st.container()
 
+    scroll_to_table_now = False
+    selected_rows = get_selected_rows()
+    with row_controls:
+        st.subheader("행 관리")
+        row_col1, row_col2, row_col3 = st.columns(3)
+        if "row_add_count" in st.session_state:
+            st.session_state["row_add_count"] = min(
+                500, max(1, int(st.session_state["row_add_count"]))
+            )
+        add_count = int(
+            row_col1.number_input(
+                "추가 개수",
+                min_value=1,
+                max_value=500,
+                value=1,
+                step=1,
+                key="row_add_count",
+            )
+        )
+        if row_col1.button(f"{add_count}개 행 추가", use_container_width=True):
+            add_row(add_count)
+            scroll_to_table_now = True
+        max_delete = max(1, len(st.session_state.df))
+        if "row_delete_count" in st.session_state:
+            st.session_state["row_delete_count"] = min(
+                max_delete, max(1, int(st.session_state["row_delete_count"]))
+            )
+        delete_count = int(
+            row_col2.number_input(
+                "삭제 개수(뒤에서)",
+                min_value=1,
+                max_value=max_delete,
+                value=min(1, max_delete),
+                step=1,
+                key="row_delete_count",
+            )
+        )
+        if row_col2.button(
+            f"마지막 {delete_count}개 행 삭제",
+            use_container_width=True,
+            disabled=st.session_state.df.empty,
+        ):
+            delete_last_row(delete_count)
+            scroll_to_table_now = True
+        if row_col3.button(
+            f"선택 행 삭제 ({len(selected_rows)}개)",
+            use_container_width=True,
+            disabled=not selected_rows,
+            help="데이터 테이블에서 체크한 행을 삭제합니다.",
+        ):
+            delete_selected_rows()
+            scroll_to_table_now = True
+
+    with history_controls:
+        st.subheader("변경 이력")
+        hist_col1, hist_col2 = st.columns(2)
+        if hist_col1.button("되돌리기", use_container_width=True, disabled=not can_undo()):
+            undo_changes()
+            scroll_to_table_now = True
+        if hist_col2.button("다시 실행", use_container_width=True, disabled=not can_redo()):
+            redo_changes()
+            scroll_to_table_now = True
+
     st.divider()
 
+    st.markdown("<div id='data-table-anchor'></div>", unsafe_allow_html=True)
     st.subheader("데이터 테이블")
     ensure_row_selection_length()
     display_df = st.session_state.df.copy()
@@ -1265,35 +2212,24 @@ def render_admin_page() -> None:
     else:
         ensure_row_selection_length()
 
-    selected_rows = get_selected_rows()
-
-    with row_controls:
-        st.subheader("행 관리")
-        row_col1, row_col2, row_col3 = st.columns(3)
-        if row_col1.button("행 추가", use_container_width=True):
-            add_row()
-            st.rerun()
-        if row_col2.button("마지막 행 삭제", use_container_width=True):
-            delete_last_row()
-            st.rerun()
-        if row_col3.button(
-            "선택 행 삭제",
-            use_container_width=True,
-            disabled=not selected_rows,
-            help="데이터 테이블에서 체크한 행을 삭제합니다.",
-        ):
-            delete_selected_rows()
-            st.rerun()
-
-    with history_controls:
-        st.subheader("변경 이력")
-        hist_col1, hist_col2 = st.columns(2)
-        if hist_col1.button("되돌리기", use_container_width=True, disabled=not can_undo()):
-            undo_changes()
-            st.rerun()
-        if hist_col2.button("다시 실행", use_container_width=True, disabled=not can_redo()):
-            redo_changes()
-            st.rerun()
+    if scroll_to_table_now or should_scroll_to_table:
+        components.html(
+            """
+            <script>
+            (() => {
+              try {
+                const hostDoc = window.parent.document;
+                const anchor = hostDoc.getElementById("data-table-anchor");
+                if (anchor) {
+                  anchor.scrollIntoView({ behavior: "auto", block: "start" });
+                }
+              } catch (err) {}
+            })();
+            </script>
+            """,
+            height=0,
+        )
+        st.session_state[SCROLL_TO_TABLE_FLAG] = False
 
 
 def build_csv_bytes(df: pd.DataFrame) -> bytes:
@@ -1304,6 +2240,23 @@ def build_excel_bytes(df: pd.DataFrame) -> bytes:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, index=False)
+        workbook = writer.book
+        sheet = writer.sheets.get("Sheet1")
+        if sheet is not None:
+            max_row = len(df) + 1
+            for col_idx, column in enumerate(df.columns, start=1):
+                options = SELECT_COLUMN_OPTIONS.get(column)
+                if not options:
+                    continue
+                valid_options = [opt.replace("\n", " / ") for opt in options if opt]
+                if not valid_options:
+                    continue
+                formula = '"' + ",".join(option.replace('"', '""') for option in valid_options) + '"'
+                dv = DataValidation(type="list", formula1=formula, allow_blank=True)
+                column_letter = get_column_letter(col_idx)
+                dv_range = f"{column_letter}2:{column_letter}{max_row}"
+                dv.add(dv_range)
+                sheet.add_data_validation(dv)
     buffer.seek(0)
     return buffer.read()
 
@@ -1327,28 +2280,44 @@ def main() -> None:
     view_param = normalize_query_value(params.get("view"), "sample")
     factory_param = normalize_query_value(params.get("factory"), "")
 
-    page_options = ("샘플 진행", "한도 제작", "관리 페이지")
-    page_index = {"sample": 0, "factory": 0, "limit": 1, "admin": 2}.get(view_param, 0)
-    page = st.sidebar.radio("페이지", page_options, index=page_index)
+    indent = "\u00A0\u00A0"
+    nav_items: list[tuple[str, str, str | None]] = [
+        ("샘플 종합 진도 현황", "sample", None),
+        (f"{indent}C관", "factory", "C관"),
+        (f"{indent}S관", "factory", "S관"),
+        (f"{indent}FRP", "factory", "FRP"),
+        ("한도 제작", "limit", None),
+        ("관리 페이지", "admin", None),
+    ]
 
-    if page == "샘플 진행":
-        factory_options = ("전체",) + tuple(LOCATION_DISPLAY_ORDER)
+    def initial_index() -> int:
         if view_param == "factory" and factory_param in LOCATION_DISPLAY_ORDER:
-            factory_index = factory_options.index(factory_param)
-        else:
-            factory_index = 0
-        selected_factory = st.sidebar.radio(
-            "샘플 진행",
-            factory_options,
-            index=factory_index,
-        )
-        if selected_factory == "전체":
-            set_query_params(view="sample")
-            render_sample_dashboard()
-        else:
-            set_query_params(view="factory", factory=selected_factory)
-            render_factory_detail_page(selected_factory)
-    elif page == "한도 제작":
+            return 1 + LOCATION_DISPLAY_ORDER.index(factory_param)
+        if view_param == "limit":
+            return 1 + len(LOCATION_DISPLAY_ORDER)
+        if view_param == "admin":
+            return 2 + len(LOCATION_DISPLAY_ORDER)
+        return 0
+
+    nav_key = "sidebar_nav_selection"
+    if nav_key not in st.session_state:
+        st.session_state[nav_key] = initial_index()
+
+    selection = st.sidebar.radio(
+        "페이지",
+        list(range(len(nav_items))),
+        format_func=lambda idx: nav_items[idx][0],
+        key=nav_key,
+    )
+    page_type, factory_target = nav_items[selection][1:]
+
+    if page_type == "sample":
+        set_query_params(view="sample")
+        render_sample_dashboard()
+    elif page_type == "factory" and factory_target:
+        set_query_params(view="factory", factory=factory_target)
+        render_factory_detail_page(factory_target)
+    elif page_type == "limit":
         set_query_params(view="limit")
         render_limit_dashboard()
     else:
