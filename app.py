@@ -37,6 +37,14 @@ LOCATION_CANDIDATE_COLUMNS = [
     "샘플제작공장위치",
 ]
 LOCATION_DISPLAY_ORDER = ["C관", "S관", "FRP"]
+FACTORY_QUERY_CODE_TO_NAME = {
+    "c": "C관",
+    "s": "S관",
+    "frp": "FRP",
+}
+FACTORY_NAME_TO_QUERY_CODE = {
+    value: key for key, value in FACTORY_QUERY_CODE_TO_NAME.items()
+}
 LENS_CONFIRM_COLUMN = "렌즈 컨펌일"
 LIMIT_CONFIRM_COLUMN = "한도 컨펌일"
 LIMIT_BUILD_COLUMN = "한도 제작"
@@ -1118,14 +1126,12 @@ def sync_manual_period_inputs(
     render_period_field_label(start_col, "시작일")
     manual_start = start_col.date_input(
         "시작일",
-        value=st.session_state[start_key],
         key=start_key,
         label_visibility="collapsed",
     )
     render_period_field_label(end_col, "종료일")
     manual_end = end_col.date_input(
         "종료일",
-        value=st.session_state[end_key],
         key=end_key,
         label_visibility="collapsed",
     )
@@ -1252,14 +1258,28 @@ def render_location_card(stage_summary: OrderedDict[str, dict[str, int]]) -> str
                 if not count:
                     continue
                 percentage = (count / total) * 100
-                segments.append(
-                    f"<div class='factory-bar-segment' style='width:{percentage:.4f}%;background:{STAGE_COLORS.get(stage, '#d1d5db')}' title='{stage}: {count}건'></div>"
+                if percentage >= 22:
+                    label_text = f"{stage} {count}건"
+                elif percentage >= 12:
+                    label_text = f"{count}건"
+                else:
+                    label_text = ""
+                label_html = (
+                    f"<span class='factory-segment-label'>{html.escape(label_text)}</span>"
+                    if label_text
+                    else ""
                 )
-        bar_inner = "".join(segments) if segments else "<div class='factory-bar-empty'>데이터 없음</div>"
-        query = urlencode({"view": "factory", "factory": loc})
-        safe_query = html.escape(query, quote=True)
+                segments.append(
+                    f"<div class='factory-bar-segment' style='width:{percentage:.4f}%;background:{STAGE_COLORS.get(stage, '#d1d5db')}' title='{stage}: {count}건'>{label_html}</div>"
+                )
+            bar_inner = "".join(segments)
+        else:
+            bar_inner = "<div class='factory-bar-empty'>데이터 없음</div>"
         rows_html.append(
-            f"<div class='factory-row'><div class='factory-name'>{loc}</div><div class='factory-row-bar'>{bar_inner}</div><a class='factory-detail-btn' href='?{safe_query}'>상세보기</a></div>"
+            "<div class='factory-row'>"
+            f"<div class='factory-name'>{loc}</div>"
+            f"<div class='factory-row-main'><div class='factory-row-bar'>{bar_inner}</div></div>"
+            "</div>"
         )
     card_html = (
         "<div class='chart-card factory-card'><div class='chart-card-title'>공장별 샘플 진행 현황</div>"
@@ -1463,7 +1483,7 @@ def render_sample_dashboard() -> None:
     st.markdown(
         """
         <div class="page-hero">
-            <div class="page-hero-title">샘플 진행 현황</div>
+            <div class="page-hero-title">샘플 종합 진도 현황</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1478,6 +1498,17 @@ def render_sample_dashboard() -> None:
     target_df = prepare_dashboard_data(
         st.session_state.df, preset_start, preset_end
     )
+    stage_idx_raw = normalize_query_value(st.query_params.get("stage_idx"), "")
+    selected_stage_idx: int | None = None
+    if str(stage_idx_raw).strip():
+        try:
+            candidate_idx = int(str(stage_idx_raw).strip())
+            if 0 <= candidate_idx < len(STAGE_ORDER):
+                selected_stage_idx = candidate_idx
+        except ValueError:
+            selected_stage_idx = None
+    selected_stage = STAGE_ORDER[selected_stage_idx] if selected_stage_idx is not None else ""
+
     period_text = (
         f"{preset_start:%Y년 %m월 %d일} ~ {preset_end:%Y년 %m월 %d일} "
         "샘플 접수일 기준"
@@ -1506,7 +1537,7 @@ def render_sample_dashboard() -> None:
     with left_col:
         st.markdown("<div class='left-column-wrap'>", unsafe_allow_html=True)
         st.markdown(
-            f"<div class='left-caption'>{period_text}</div>",
+            f"<div class='left-caption left-caption-strong'>{period_text}</div>",
             unsafe_allow_html=True,
         )
         fig = px.pie(
@@ -1524,7 +1555,8 @@ def render_sample_dashboard() -> None:
         fig.update_traces(
             texttemplate="<b>%{label}</b><br><b>%{value}건</b>",
             textposition="inside",
-            textfont=dict(size=12),
+            textfont=dict(size=14, color="#0f172a"),
+            insidetextorientation="horizontal",
             hole=0.35,
             hovertemplate="%{label}: %{value}건<extra></extra>",
         )
@@ -1533,9 +1565,12 @@ def render_sample_dashboard() -> None:
             x=0.5,
             y=0.5,
             showarrow=False,
-            font=dict(size=16, color="#334155"),
+            font=dict(size=19, color="#1e293b"),
         )
-        render_chart_card(fig)
+        render_chart_card(
+            fig,
+            title="<span style='font-size:0.94rem;font-weight:600;color:#4b5563;'>샘플 종합 진도 현황</span>",
+        )
         legend_html = "".join(
             f"<span><span class='legend-dot' style='background:{STAGE_COLORS.get(stage, '#d1d5db')}'></span>{stage}</span>"
             for stage in STAGE_ORDER
@@ -1546,11 +1581,26 @@ def render_sample_dashboard() -> None:
             f"<div class='left-stack'><div class='status-legend'>{legend_html}</div>{location_card_html}</div>",
             unsafe_allow_html=True,
         )
+        detail_cols = st.columns(len(LOCATION_DISPLAY_ORDER))
+        for loc_idx, loc_name in enumerate(LOCATION_DISPLAY_ORDER):
+            with detail_cols[loc_idx]:
+                if st.button(
+                    f"{loc_name} 상세보기",
+                    key=f"factory_detail_native_{loc_idx}",
+                    use_container_width=True,
+                ):
+                    nav_index = 1 + loc_idx
+                    set_query_params(
+                        view="factory",
+                        factory=FACTORY_NAME_TO_QUERY_CODE.get(loc_name, loc_name),
+                        nav=nav_index,
+                    )
+                    st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
     with right_col:
         st.markdown('<div class="status-list">', unsafe_allow_html=True)
-        for stage in STAGE_ORDER:
+        for stage_idx, stage in enumerate(STAGE_ORDER):
             entries = target_df[target_df["__stage__"] == stage]
             color = STAGE_COLORS.get(stage, "#cccccc")
             if entries.empty:
@@ -1573,26 +1623,59 @@ def render_sample_dashboard() -> None:
                     lines.append(f'<div class="status-item">…외 {len(entries) - 2}건</div>')
                 items_html = '<div class="status-items">' + "".join(lines) + "</div>"
 
-            st.markdown(
-                f"""
-                <div class="status-card" style="border-left-color:{color};">
-                    <div class="status-info">
-                        <div class="status-name">{stage}</div>
-                        {items_html}
+            selected_class = " status-card-selected" if selected_stage_idx == stage_idx else ""
+            row_card_col, row_btn_col = st.columns([4.8, 1.2], gap="small")
+            with row_card_col:
+                st.markdown(
+                    f"""
+                    <div class="status-card{selected_class}" style="border-left-color:{color};">
+                        <div class="status-info">
+                            <div class="status-name">{stage}</div>
+                            {items_html}
+                        </div>
+                        <div class="status-count">{len(entries)}건</div>
                     </div>
-                    <div class="status-count">{len(entries)}건</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+                    """,
+                    unsafe_allow_html=True,
+                )
+            with row_btn_col:
+                if st.button(
+                    "목록보기",
+                    key=f"stage_popup_native_{stage_idx}",
+                    use_container_width=True,
+                ):
+                    set_query_params(view="sample", stage_idx=stage_idx, nav=0)
+                    st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
+
+    st.caption("오른쪽 목록보기 버튼을 클릭하면 해당 단계의 샘플 목록이 팝업으로 열립니다.")
+    if selected_stage:
+        selected_df = target_df[target_df["__stage__"] == selected_stage].copy()
+        detail_df = selected_df.drop(columns=["__stage__"], errors="ignore")
+
+        @st.dialog(f"{selected_stage} 샘플 목록 ({len(detail_df)}건)", width="large")
+        def show_stage_samples_dialog() -> None:
+            if detail_df.empty:
+                st.info(f"{selected_stage} 상태에 해당하는 샘플이 없습니다.")
+            else:
+                st.dataframe(
+                    detail_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(640, 220 + 34 * len(detail_df)),
+                )
+            if st.button("닫기", key=f"close_stage_dialog_{selected_stage}"):
+                set_query_params(view="sample", stage_idx=None)
+                st.rerun()
+
+        show_stage_samples_dialog()
 
 
 def render_factory_detail_page(factory_name: str) -> None:
     today = datetime.now()
     st.markdown(
         f"""
-        <div class="page-hero">
+        <div class="page-hero page-hero-factory">
             <div class="page-hero-title">샘플 진행 현황 - {factory_name}</div>
         </div>
         """,
@@ -1644,26 +1727,29 @@ def render_factory_detail_page(factory_name: str) -> None:
         fig.update_traces(
             texttemplate="<b>%{text}</b>",
             textposition="outside",
-            textfont=dict(size=12),
+            textfont=dict(size=13, color="#111827"),
             cliponaxis=False,
             hovertemplate="%{x}: %{y}건<extra></extra>",
         )
         fig.update_layout(
-            height=320,
-            margin=dict(l=24, r=12, t=20, b=56),
+            height=340,
+            margin=dict(l=34, r=14, t=24, b=64),
             showlegend=False,
             bargap=0.35,
+            uniformtext=dict(minsize=13, mode="show"),
             xaxis_title=None,
             yaxis_title=None,
             xaxis=dict(
-                tickangle=0,
-                tickfont=dict(size=11),
+                tickangle=-8,
+                tickfont=dict(size=12, color="#111827"),
                 automargin=True,
             ),
             yaxis=dict(
                 rangemode="tozero",
                 dtick=1,
-                tickfont=dict(size=11),
+                tickformat="d",
+                tickfont=dict(size=12, color="#111827"),
+                gridcolor="#dbe4f0",
                 automargin=True,
             ),
         )
@@ -2279,6 +2365,17 @@ def main() -> None:
     params = st.query_params
     view_param = normalize_query_value(params.get("view"), "sample")
     factory_param = normalize_query_value(params.get("factory"), "")
+    stage_idx_param = normalize_query_value(params.get("stage_idx"), "")
+    nav_param = normalize_query_value(params.get("nav"), "")
+
+    factory_param_text = str(factory_param).strip()
+    factory_param_key = factory_param_text.lower()
+    if factory_param_text in LOCATION_DISPLAY_ORDER:
+        resolved_factory = factory_param_text
+    elif factory_param_key in FACTORY_QUERY_CODE_TO_NAME:
+        resolved_factory = FACTORY_QUERY_CODE_TO_NAME[factory_param_key]
+    else:
+        resolved_factory = ""
 
     indent = "\u00A0\u00A0"
     nav_items: list[tuple[str, str, str | None]] = [
@@ -2290,9 +2387,20 @@ def main() -> None:
         ("관리 페이지", "admin", None),
     ]
 
+    forced_nav_index: int | None = None
+    if str(nav_param).strip():
+        try:
+            parsed_nav = int(str(nav_param).strip())
+            if 0 <= parsed_nav < len(nav_items):
+                forced_nav_index = parsed_nav
+        except ValueError:
+            forced_nav_index = None
+
     def initial_index() -> int:
-        if view_param == "factory" and factory_param in LOCATION_DISPLAY_ORDER:
-            return 1 + LOCATION_DISPLAY_ORDER.index(factory_param)
+        if forced_nav_index is not None:
+            return forced_nav_index
+        if view_param == "factory" and resolved_factory in LOCATION_DISPLAY_ORDER:
+            return 1 + LOCATION_DISPLAY_ORDER.index(resolved_factory)
         if view_param == "limit":
             return 1 + len(LOCATION_DISPLAY_ORDER)
         if view_param == "admin":
@@ -2302,6 +2410,15 @@ def main() -> None:
     nav_key = "sidebar_nav_selection"
     if nav_key not in st.session_state:
         st.session_state[nav_key] = initial_index()
+    last_nav_key = "__last_sidebar_nav_selection"
+    if forced_nav_index is not None:
+        st.session_state[nav_key] = forced_nav_index
+        st.session_state[last_nav_key] = forced_nav_index
+    previous_selection = st.session_state.get(last_nav_key, st.session_state[nav_key])
+    query_selection = initial_index()
+    radio_changed = st.session_state[nav_key] != previous_selection
+    if not radio_changed and st.session_state[nav_key] != query_selection:
+        st.session_state[nav_key] = query_selection
 
     selection = st.sidebar.radio(
         "페이지",
@@ -2309,13 +2426,26 @@ def main() -> None:
         format_func=lambda idx: nav_items[idx][0],
         key=nav_key,
     )
+    st.session_state[last_nav_key] = selection
+
     page_type, factory_target = nav_items[selection][1:]
 
     if page_type == "sample":
-        set_query_params(view="sample")
+        stage_idx_value: int | None = None
+        if str(stage_idx_param).strip():
+            try:
+                parsed_idx = int(str(stage_idx_param).strip())
+                if 0 <= parsed_idx < len(STAGE_ORDER):
+                    stage_idx_value = parsed_idx
+            except ValueError:
+                stage_idx_value = None
+        set_query_params(view="sample", stage_idx=stage_idx_value)
         render_sample_dashboard()
     elif page_type == "factory" and factory_target:
-        set_query_params(view="factory", factory=factory_target)
+        set_query_params(
+            view="factory",
+            factory=FACTORY_NAME_TO_QUERY_CODE.get(factory_target, factory_target),
+        )
         render_factory_detail_page(factory_target)
     elif page_type == "limit":
         set_query_params(view="limit")
