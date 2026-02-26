@@ -152,12 +152,12 @@ SELECT_COLUMN_OPTIONS = {
 }
 STAGE_ORDER = ["대기", "진행중", "납기임박", "납기지연", "보류", "완료"]
 STAGE_COLORS = {
-    "대기": "#7f86d9",
-    "진행중": "#4fa9c4",
-    "납기임박": "#e8ad54",
-    "납기지연": "#de7565",
-    "보류": "#7e8da6",
-    "완료": "#9cb9ae",
+    "대기": "#8b7edb",
+    "진행중": "#51b2ce",
+    "납기임박": "#e59b3a",
+    "납기지연": "#e36c5c",
+    "보류": "#7a8a9f",
+    "완료": "#c3cbd9",
 }
 
 
@@ -1570,6 +1570,9 @@ def render_sample_dashboard() -> None:
         render_chart_card(
             fig,
             title="<span style='font-size:0.94rem;font-weight:600;color:#4b5563;'>샘플 종합 진도 현황</span>",
+            chart_width=390,
+            chart_height=310,
+            card_width=500,
         )
         legend_html = "".join(
             f"<span><span class='legend-dot' style='background:{STAGE_COLORS.get(stage, '#d1d5db')}'></span>{stage}</span>"
@@ -1599,6 +1602,7 @@ def render_sample_dashboard() -> None:
         st.markdown("</div>", unsafe_allow_html=True)
 
     with right_col:
+        st.markdown("<div class='status-list-top-spacer'></div>", unsafe_allow_html=True)
         st.markdown('<div class="status-list">', unsafe_allow_html=True)
         for stage_idx, stage in enumerate(STAGE_ORDER):
             entries = target_df[target_df["__stage__"] == stage]
@@ -1646,6 +1650,7 @@ def render_sample_dashboard() -> None:
                 ):
                     set_query_params(view="sample", stage_idx=stage_idx, nav=0)
                     st.rerun()
+        st.markdown("<div class='status-list-bottom-spacer'></div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.caption("오른쪽 목록보기 버튼을 클릭하면 해당 단계의 샘플 목록이 팝업으로 열립니다.")
@@ -2356,7 +2361,7 @@ def main() -> None:
         """
         <style>
         .sidebar .sidebar-content {
-            background: linear-gradient(180deg, #eef2ff, #f9fafb);
+            background: #ffffff;
         }
         </style>
         """,
