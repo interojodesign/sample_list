@@ -3,5 +3,5 @@ __pycache__/
 !app_compiled.pyc
 .venv/
 sample-list.csv
-sample-list.xlsx
+!sample-list.xlsx
 .last-used-file
