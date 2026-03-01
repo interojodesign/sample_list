@@ -1539,7 +1539,7 @@ def render_sample_dashboard() -> None:
 
     period_text = (
         f"{preset_start:%Y년 %m월 %d일} ~ {preset_end:%Y년 %m월 %d일} "
-        "발송일 기준 (미지정 포함)"
+        "발송일 기준"
     )
     if target_df.empty:
         st.info("해당 기간에 등록된 샘플이 없습니다.")
@@ -1780,7 +1780,7 @@ def render_factory_detail_page(factory_name: str) -> None:
     _, preset_start, preset_end = render_period_selector(today, f"factory_{factory_name}")
     st.markdown(
         f"<p class='page-caption'>{preset_start:%Y년 %m월 %d일} ~ {preset_end:%Y년 %m월 %d일} "
-        "발송일 기준 (미지정 포함)</p>",
+        "발송일 기준</p>",
         unsafe_allow_html=True,
     )
 
