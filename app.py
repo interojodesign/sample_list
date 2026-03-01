@@ -1535,75 +1535,76 @@ def render_sample_dashboard() -> None:
 
     left_col, right_col = st.columns([1.2, 1])
     with left_col:
-        st.markdown("<div class='left-column-wrap'>", unsafe_allow_html=True)
-        st.markdown(
-            f"<div class='left-caption left-caption-strong'>{period_text}</div>",
-            unsafe_allow_html=True,
-        )
-        fig = px.pie(
-            pie_df,
-            values="count",
-            names="stage",
-            color="stage",
-            category_orders={"stage": STAGE_ORDER},
-            color_discrete_map=STAGE_COLORS,
-        )
-        fig.update_layout(
-            margin=dict(l=20, r=20, t=10, b=10),
-            showlegend=False,
-        )
-        fig.update_traces(
-            texttemplate="<b>%{label}</b><br><b>%{value}건</b>",
-            textposition="inside",
-            textfont=dict(size=14, color="#0f172a"),
-            insidetextorientation="horizontal",
-            hole=0.35,
-            hovertemplate="%{label}: %{value}건<extra></extra>",
-        )
-        fig.add_annotation(
-            text=f"<b>총 {total_count}건</b>",
-            x=0.5,
-            y=0.5,
-            showarrow=False,
-            font=dict(size=19, color="#1e293b"),
-        )
-        render_chart_card(
-            fig,
-            title="<span style='font-size:0.94rem;font-weight:600;color:#4b5563;'>샘플 종합 진도 현황</span>",
-            chart_width=390,
-            chart_height=310,
-            card_width=500,
-        )
-        legend_html = "".join(
-            f"<span><span class='legend-dot' style='background:{STAGE_COLORS.get(stage, '#d1d5db')}'></span>{stage}</span>"
-            for stage in STAGE_ORDER
-        )
-        location_summary = build_location_stage_summary(target_df)
-        location_card_html = render_location_card(location_summary)
-        st.markdown(
-            f"<div class='left-stack'><div class='status-legend'>{legend_html}</div>{location_card_html}</div>",
-            unsafe_allow_html=True,
-        )
-        detail_cols = st.columns(len(LOCATION_DISPLAY_ORDER))
-        for loc_idx, loc_name in enumerate(LOCATION_DISPLAY_ORDER):
-            with detail_cols[loc_idx]:
-                if st.button(
-                    f"{loc_name} 상세보기",
-                    key=f"factory_detail_native_{loc_idx}",
-                    use_container_width=True,
-                ):
-                    nav_index = 1 + loc_idx
-                    set_query_params(
-                        view="factory",
-                        factory=FACTORY_NAME_TO_QUERY_CODE.get(loc_name, loc_name),
-                        nav=nav_index,
-                    )
-                    st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
+        left_panel = st.container(key="left_panel")
+        with left_panel:
+            st.markdown("<div class='left-column-wrap'>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='left-caption left-caption-strong'>{period_text}</div>",
+                unsafe_allow_html=True,
+            )
+            fig = px.pie(
+                pie_df,
+                values="count",
+                names="stage",
+                color="stage",
+                category_orders={"stage": STAGE_ORDER},
+                color_discrete_map=STAGE_COLORS,
+            )
+            fig.update_layout(
+                margin=dict(l=20, r=20, t=10, b=10),
+                showlegend=False,
+            )
+            fig.update_traces(
+                texttemplate="<b>%{label}</b><br><b>%{value}건</b>",
+                textposition="inside",
+                textfont=dict(size=14, color="#0f172a"),
+                insidetextorientation="horizontal",
+                hole=0.35,
+                hovertemplate="%{label}: %{value}건<extra></extra>",
+            )
+            fig.add_annotation(
+                text=f"<b>총 {total_count}건</b>",
+                x=0.5,
+                y=0.5,
+                showarrow=False,
+                font=dict(size=19, color="#1e293b"),
+            )
+            render_chart_card(
+                fig,
+                title="<span style='font-size:0.94rem;font-weight:600;color:#4b5563;'>샘플 종합 진도 현황</span>",
+                chart_width=390,
+                chart_height=310,
+                card_width=500,
+            )
+            legend_html = "".join(
+                f"<span><span class='legend-dot' style='background:{STAGE_COLORS.get(stage, '#d1d5db')}'></span>{stage}</span>"
+                for stage in STAGE_ORDER
+            )
+            location_summary = build_location_stage_summary(target_df)
+            location_card_html = render_location_card(location_summary)
+            st.markdown(
+                f"<div class='left-stack'><div class='status-legend'>{legend_html}</div>{location_card_html}</div>",
+                unsafe_allow_html=True,
+            )
+            detail_cols = st.columns(len(LOCATION_DISPLAY_ORDER))
+            for loc_idx, loc_name in enumerate(LOCATION_DISPLAY_ORDER):
+                with detail_cols[loc_idx]:
+                    if st.button(
+                        f"{loc_name} 상세보기",
+                        key=f"factory_detail_native_{loc_idx}",
+                        use_container_width=True,
+                    ):
+                        nav_index = 1 + loc_idx
+                        set_query_params(
+                            view="factory",
+                            factory=FACTORY_NAME_TO_QUERY_CODE.get(loc_name, loc_name),
+                            nav=nav_index,
+                        )
+                        st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
 
     with right_col:
-        st.markdown("<div class='status-list-top-spacer'></div>", unsafe_allow_html=True)
-        st.markdown('<div class="status-list">', unsafe_allow_html=True)
+        status_panel = st.container(key="status_panel", gap="small")
         for stage_idx, stage in enumerate(STAGE_ORDER):
             entries = target_df[target_df["__stage__"] == stage]
             color = STAGE_COLORS.get(stage, "#cccccc")
@@ -1628,7 +1629,7 @@ def render_sample_dashboard() -> None:
                 items_html = '<div class="status-items">' + "".join(lines) + "</div>"
 
             selected_class = " status-card-selected" if selected_stage_idx == stage_idx else ""
-            row_card_col, row_btn_col = st.columns([4.8, 1.2], gap="small")
+            row_card_col, row_btn_col = status_panel.columns([4.8, 1.2], gap="small")
             with row_card_col:
                 st.markdown(
                     f"""
@@ -1650,8 +1651,8 @@ def render_sample_dashboard() -> None:
                 ):
                     set_query_params(view="sample", stage_idx=stage_idx, nav=0)
                     st.rerun()
-        st.markdown("<div class='status-list-bottom-spacer'></div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+            if stage_idx < len(STAGE_ORDER) - 1:
+                status_panel.markdown("<div class='status-row-gap'></div>", unsafe_allow_html=True)
 
     st.caption("오른쪽 목록보기 버튼을 클릭하면 해당 단계의 샘플 목록이 팝업으로 열립니다.")
     if selected_stage:

@@ -303,10 +303,9 @@ button.factory-detail-btn:hover {
   filter: none;
 }
 
-.status-list {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
+.st-key-status_panel {
+  padding-top: 0;
+  margin-top: 52px;
 }
 
 .status-card {
@@ -373,7 +372,11 @@ div[class*="st-key-factory_detail_native_"] {
 }
 
 div[class*="st-key-stage_popup_native_"] {
-  margin-top: 0.9rem;
+  margin-top: 0.42rem;
+}
+
+.status-row-gap {
+  height: 16px;
 }
 
 div[class*="st-key-stage_popup_native_"] button,
@@ -396,14 +399,6 @@ div[class*="st-key-factory_detail_native_"] button:hover {
   background: #d8eee8 !important;
   filter: none !important;
   transform: translateY(-1px);
-}
-
-.status-list-top-spacer {
-  height: 28px;
-}
-
-.status-list-bottom-spacer {
-  height: 16px;
 }
 
 .limit-summary {
@@ -693,11 +688,12 @@ td.empty {
     padding: 0.9rem 0.95rem;
   }
 
-  .status-list-bottom-spacer {
-    height: 18px;
+  .st-key-status_panel {
+    margin-top: 0;
   }
 
-  .status-list-top-spacer {
-    height: 10px;
+  .status-row-gap {
+    height: 8px;
   }
+
 }
