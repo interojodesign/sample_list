@@ -135,6 +135,16 @@ _OLD_MISSING_STAGE_LABELS = {
     "발송예정일 미설정",
     "발송일 미확정",
 }
+_STAGE_TONE_PALETTE = {
+    # Muted, balanced palette: distinct but easy on the eyes.
+    "샘플 발송일 미확정": "#A9CFAF",
+    "대기": "#B4A8DE",
+    "진행중": "#A9CFE0",
+    "납기임박": "#E2C98C",
+    "납기지연": "#DEA692",
+    "보류": "#B4BCCB",
+    "완료": "#D3D8E2",
+}
 
 
 def _normalize_stage_label(value: str) -> str:
@@ -154,13 +164,9 @@ if hasattr(compiled_app, "STAGE_ORDER"):
 
 if hasattr(compiled_app, "STAGE_COLORS"):
     stage_colors = dict(getattr(compiled_app, "STAGE_COLORS", {}) or {})
-    chosen_color = None
     for old in _OLD_MISSING_STAGE_LABELS:
-        if old in stage_colors:
-            chosen_color = stage_colors.pop(old)
-    if _NEW_MISSING_STAGE_LABEL in stage_colors:
-        chosen_color = stage_colors[_NEW_MISSING_STAGE_LABEL]
-    stage_colors[_NEW_MISSING_STAGE_LABEL] = chosen_color or "#72b788"
+        stage_colors.pop(old, None)
+    stage_colors.update(_STAGE_TONE_PALETTE)
     compiled_app.STAGE_COLORS = stage_colors
 
 if hasattr(compiled_app, "determine_stage"):
@@ -253,7 +259,7 @@ if hasattr(compiled_app, "render_period_selector") and hasattr(compiled_app, "FI
             )
 
             label_col.markdown(
-                "<p class='period-inline-label'>조회할 기간</p>",
+                "<p class='period-inline-label'>기간 조회</p>",
                 unsafe_allow_html=True,
             )
 
@@ -286,7 +292,7 @@ if hasattr(compiled_app, "render_period_selector") and hasattr(compiled_app, "FI
 
             with input_col:
                 selected_range = st.date_input(
-                    "조회할 기간",
+                    "기간 조회",
                     key=range_key,
                     label_visibility="collapsed",
                 )
