@@ -1147,11 +1147,15 @@ def render_period_selector(
     today: datetime, key_prefix: str
 ) -> tuple[str, datetime, datetime]:
     period_options = list(FILTER_PRESETS.keys())
+    default_period = "분기별"
+    default_period_index = (
+        period_options.index(default_period) if default_period in period_options else 0
+    )
     period_choice = st.radio(
         "조회 범위",
         period_options,
         horizontal=True,
-        index=1,
+        index=default_period_index,
         label_visibility="collapsed",
         key=f"{key_prefix}_period",
     )
@@ -1159,7 +1163,7 @@ def render_period_selector(
     ranged_periods = {"월별", "분기별", "반기별", "년도별"}
     if period_choice in ranged_periods:
         expander_col, _ = st.columns([1.5, 2])
-        with expander_col.expander("기간 선택", expanded=True):
+        with expander_col.expander("기간 선택", expanded=False):
             if period_choice == "년도별":
                 col_year, col_start, col_end = st.columns([1, 1.3, 1.3])
                 preset_start, preset_end = render_year_selector(
