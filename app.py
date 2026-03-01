@@ -50,6 +50,7 @@ LIMIT_CONFIRM_COLUMN = "한도 컨펌일"
 LIMIT_BUILD_COLUMN = "한도 제작"
 LIMIT_READY_TOKENS = {"MIN", "MAX", "MIN+MAX"}
 DELAY_DATE_COLUMN = "납기 지연(발송일 변경)"
+MISSING_SHIPMENT_STAGE_QUERY = "missing_ship"
 
 def normalize_dia_value(value: str) -> str:
     text = str(value).replace("\\n", "\n").strip()
@@ -749,6 +750,12 @@ FILTER_DATE_CANDIDATES = [
     "샘플 최초 접수일",
     "샘플 (수정)접수일",
 ]
+SHIPMENT_DATE_CANDIDATES = [
+    DELAY_DATE_COLUMN,
+    "발송 예정일",
+    "배송/예정일",
+    "발송일",
+]
 PERIOD_LABEL_STYLE = """
 <style>
 .period-field-label {
@@ -778,6 +785,20 @@ def get_filter_date_series(df: pd.DataFrame) -> pd.Series:
     return pd.Series([None] * len(df), index=df.index)
 
 
+def get_shipment_date_series(df: pd.DataFrame) -> pd.Series:
+    if df.empty:
+        return pd.Series([], index=df.index)
+    resolved = pd.Series([None] * len(df), index=df.index, dtype=object)
+    for column in SHIPMENT_DATE_CANDIDATES:
+        if column not in df.columns:
+            continue
+        parsed = df[column].apply(parse_date)
+        fill_mask = resolved.isna() & parsed.notna()
+        if fill_mask.any():
+            resolved.loc[fill_mask] = parsed.loc[fill_mask]
+    return resolved
+
+
 def prepare_dashboard_data(
     df: pd.DataFrame,
     start_date: datetime,
@@ -795,14 +816,13 @@ def prepare_dashboard_data(
     stage_series = working.apply(lambda row: determine_stage(row, end_date), axis=1)
     working.loc[:, "__stage__"] = stage_series.values
 
-    parsed_dates = get_filter_date_series(working)
-    working.loc[:, "__filter_date__"] = parsed_dates
+    parsed_dates = get_shipment_date_series(working)
+    working.loc[:, "__ship_date__"] = parsed_dates
 
-    date_mask = working["__filter_date__"].apply(
+    date_mask = working["__ship_date__"].apply(
         lambda dt: dt is None or start_date <= dt <= end_date
     )
     target = working[date_mask].copy()
-    target = target.drop(columns=["__filter_date__"])
     target = target.reset_index(drop=True)
     return target
 
@@ -948,7 +968,8 @@ def list_available_years(today: datetime) -> list[int]:
     df = st.session_state.get("df")
     if isinstance(df, pd.DataFrame) and not df.empty:
         parsed = get_filter_date_series(df)
-        for dt in parsed:
+        shipment_parsed = get_shipment_date_series(df)
+        for dt in list(parsed) + list(shipment_parsed):
             if isinstance(dt, datetime):
                 years.add(dt.year)
     return sorted(years, reverse=True)
@@ -1503,19 +1524,22 @@ def render_sample_dashboard() -> None:
         st.session_state.df, preset_start, preset_end
     )
     stage_idx_raw = normalize_query_value(st.query_params.get("stage_idx"), "")
+    selected_stage_token = str(stage_idx_raw).strip()
+    selected_missing_ship = selected_stage_token == MISSING_SHIPMENT_STAGE_QUERY
     selected_stage_idx: int | None = None
-    if str(stage_idx_raw).strip():
+    if selected_stage_token and not selected_missing_ship:
         try:
-            candidate_idx = int(str(stage_idx_raw).strip())
+            candidate_idx = int(selected_stage_token)
             if 0 <= candidate_idx < len(STAGE_ORDER):
                 selected_stage_idx = candidate_idx
         except ValueError:
             selected_stage_idx = None
     selected_stage = STAGE_ORDER[selected_stage_idx] if selected_stage_idx is not None else ""
+    missing_ship_df = target_df[target_df["__ship_date__"].isna()].copy()
 
     period_text = (
         f"{preset_start:%Y년 %m월 %d일} ~ {preset_end:%Y년 %m월 %d일} "
-        "샘플 접수일 기준"
+        "발송일 기준 (미지정 포함)"
     )
     if target_df.empty:
         st.info("해당 기간에 등록된 샘플이 없습니다.")
@@ -1609,6 +1633,59 @@ def render_sample_dashboard() -> None:
 
     with right_col:
         status_panel = st.container(key="status_panel", gap="small")
+
+        missing_color = "#64748b"
+        if missing_ship_df.empty:
+            missing_items_html = '<div class="status-empty">해당 항목이 없습니다.</div>'
+        else:
+            missing_lines = []
+            for _, row in missing_ship_df.head(2).iterrows():
+                summary_text = " / ".join(
+                    filter(
+                        None,
+                        [
+                            str(row.get("국가", "")).strip(),
+                            str(row.get("고객사", "")).strip(),
+                            str(row.get("품명", "")).strip(),
+                        ],
+                    )
+                )
+                missing_lines.append(f'<div class="status-item">{summary_text}</div>')
+            if len(missing_ship_df) > 2:
+                missing_lines.append(
+                    f'<div class="status-item">…외 {len(missing_ship_df) - 2}건</div>'
+                )
+            missing_items_html = '<div class="status-items">' + "".join(missing_lines) + "</div>"
+
+        missing_selected_class = " status-card-selected" if selected_missing_ship else ""
+        missing_card_col, missing_btn_col = status_panel.columns([4.8, 1.2], gap="small")
+        with missing_card_col:
+            st.markdown(
+                f"""
+                <div class="status-card{missing_selected_class}" style="border-left-color:{missing_color};">
+                    <div class="status-info">
+                        <div class="status-name">발송일 미지정</div>
+                        {missing_items_html}
+                    </div>
+                    <div class="status-count">{len(missing_ship_df)}건</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with missing_btn_col:
+            if st.button(
+                "목록보기",
+                key="stage_popup_native_missing_ship",
+                use_container_width=True,
+            ):
+                set_query_params(
+                    view="sample",
+                    stage_idx=MISSING_SHIPMENT_STAGE_QUERY,
+                    nav=0,
+                )
+                st.rerun()
+        status_panel.markdown("<div class='status-row-gap'></div>", unsafe_allow_html=True)
+
         for stage_idx, stage in enumerate(STAGE_ORDER):
             entries = target_df[target_df["__stage__"] == stage]
             color = STAGE_COLORS.get(stage, "#cccccc")
@@ -1659,14 +1736,19 @@ def render_sample_dashboard() -> None:
                 status_panel.markdown("<div class='status-row-gap'></div>", unsafe_allow_html=True)
 
     st.caption("오른쪽 목록보기 버튼을 클릭하면 해당 단계의 샘플 목록이 팝업으로 열립니다.")
-    if selected_stage:
-        selected_df = target_df[target_df["__stage__"] == selected_stage].copy()
-        detail_df = selected_df.drop(columns=["__stage__"], errors="ignore")
+    if selected_missing_ship or selected_stage:
+        if selected_missing_ship:
+            selected_stage_label = "발송일 미지정"
+            selected_df = missing_ship_df.copy()
+        else:
+            selected_stage_label = selected_stage
+            selected_df = target_df[target_df["__stage__"] == selected_stage].copy()
+        detail_df = selected_df.drop(columns=["__stage__", "__ship_date__"], errors="ignore")
 
-        @st.dialog(f"{selected_stage} 샘플 목록 ({len(detail_df)}건)", width="large")
+        @st.dialog(f"{selected_stage_label} 샘플 목록 ({len(detail_df)}건)", width="large")
         def show_stage_samples_dialog() -> None:
             if detail_df.empty:
-                st.info(f"{selected_stage} 상태에 해당하는 샘플이 없습니다.")
+                st.info(f"{selected_stage_label} 상태에 해당하는 샘플이 없습니다.")
             else:
                 st.dataframe(
                     detail_df,
@@ -1674,7 +1756,7 @@ def render_sample_dashboard() -> None:
                     hide_index=True,
                     height=min(640, 220 + 34 * len(detail_df)),
                 )
-            if st.button("닫기", key=f"close_stage_dialog_{selected_stage}"):
+            if st.button("닫기", key=f"close_stage_dialog_{selected_stage_label}"):
                 set_query_params(view="sample", stage_idx=None)
                 st.rerun()
 
@@ -1698,7 +1780,7 @@ def render_factory_detail_page(factory_name: str) -> None:
     _, preset_start, preset_end = render_period_selector(today, f"factory_{factory_name}")
     st.markdown(
         f"<p class='page-caption'>{preset_start:%Y년 %m월 %d일} ~ {preset_end:%Y년 %m월 %d일} "
-        "샘플 접수일 기준</p>",
+        "발송일 기준 (미지정 포함)</p>",
         unsafe_allow_html=True,
     )
 
@@ -1788,7 +1870,7 @@ def render_factory_detail_page(factory_name: str) -> None:
             card_width=600,
         )
 
-    detail_df = target_df.drop(columns=["__stage__"])
+    detail_df = target_df.drop(columns=["__stage__", "__ship_date__"], errors="ignore")
     st.dataframe(
         detail_df,
         use_container_width=True,
@@ -2441,10 +2523,13 @@ def main() -> None:
     page_type, factory_target = nav_items[selection][1:]
 
     if page_type == "sample":
-        stage_idx_value: int | None = None
-        if str(stage_idx_param).strip():
+        stage_idx_value: int | str | None = None
+        stage_idx_token = str(stage_idx_param).strip()
+        if stage_idx_token == MISSING_SHIPMENT_STAGE_QUERY:
+            stage_idx_value = MISSING_SHIPMENT_STAGE_QUERY
+        elif stage_idx_token:
             try:
-                parsed_idx = int(str(stage_idx_param).strip())
+                parsed_idx = int(stage_idx_token)
                 if 0 <= parsed_idx < len(STAGE_ORDER):
                     stage_idx_value = parsed_idx
             except ValueError:
