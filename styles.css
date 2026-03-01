@@ -174,6 +174,72 @@ body {
   letter-spacing: -0.01em;
 }
 
+.period-align-spacer {
+  display: none !important;
+  height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  line-height: 0 !important;
+}
+
+.period-inline-label {
+  margin: 0.4rem 0.08rem 0 0;
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: #334155;
+  white-space: nowrap;
+}
+
+div[class*="st-key-period_toolbar_"] {
+  margin: 0.18rem 0 0.65rem;
+  padding: 0.56rem 0.7rem 0.62rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  background: #ffffff;
+}
+
+div[class*="st-key-period_toolbar_"] [data-testid="stVerticalBlock"] {
+  gap: 0 !important;
+}
+
+div[class*="st-key-period_toolbar_"] [data-testid="stVerticalBlock"] > div {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+div[class*="st-key-period_toolbar_"] [data-testid="stHorizontalBlock"] {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+div[class*="st-key-period_toolbar_"] [data-testid="stElementContainer"] {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+div[class*="st-key-period_toolbar_"] [data-testid="stMarkdownContainer"] p {
+  margin: 0 !important;
+}
+
+div[class*="st-key-period_toolbar_"] .period-inline-label {
+  margin-top: 0.42rem;
+  font-size: 0.95rem;
+}
+
+div[class*="st-key-period_toolbar_"] [data-testid="stRadio"] {
+  margin-top: 0.08rem !important;
+}
+
+div[class*="st-key-period_toolbar_"] [data-testid="stRadio"] label {
+  margin-right: 0.6rem;
+}
+
+.period-toolbar-gap {
+  height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
 .chart-card {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -188,8 +254,16 @@ body {
   color: #1b2b27;
 }
 
+/* Make Plotly chart value/category labels bolder for readability */
+.inline-chart-body .barlayer text,
+.inline-chart-body .pointtext text,
+.inline-chart-body .xtick text,
+.inline-chart-body .legend text {
+  font-weight: 700 !important;
+}
+
 .status-legend {
-  display: flex;
+  display: none !important;
   align-items: center;
   flex-wrap: wrap;
   gap: 0.75rem 1rem;
@@ -234,7 +308,7 @@ body {
   display: flex;
   position: relative;
   overflow: hidden;
-  height: 20px;
+  height: 24px;
   border-radius: 999px;
   background: #e8efec;
   border: 1px solid #dbe5e1;
@@ -252,11 +326,12 @@ body {
   color: #14312a;
   font-size: 0.73rem;
   font-weight: 700;
-  line-height: 1;
+  line-height: 1.2;
+  display: inline-block;
   white-space: nowrap;
   text-overflow: ellipsis;
   overflow: hidden;
-  padding: 0 0.25rem;
+  padding: 0 0.3rem;
   text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
 }
 
@@ -305,7 +380,22 @@ button.factory-detail-btn:hover {
 
 .st-key-status_panel {
   padding-top: 0;
-  margin-top: 52px;
+  /* Align right status cards with left chart card top (exclude period text row). */
+  margin-top: 1.6rem;
+}
+
+.st-key-status_panel [data-testid="stVerticalBlock"] {
+  gap: 0.02rem !important;
+}
+
+.st-key-status_panel [data-testid="stVerticalBlock"] > div {
+  margin: 0 !important;
+}
+
+.st-key-status_panel [data-testid="stHorizontalBlock"] {
+  gap: 0.14rem !important;
+  margin: 0 !important;
+  padding: 0 !important;
 }
 
 .status-card {
@@ -372,11 +462,11 @@ div[class*="st-key-factory_detail_native_"] {
 }
 
 div[class*="st-key-stage_popup_native_"] {
-  margin-top: 0.42rem;
+  margin-top: -1px;
 }
 
 .status-row-gap {
-  height: 16px;
+  height: 1px;
 }
 
 div[class*="st-key-stage_popup_native_"] button,
@@ -505,6 +595,51 @@ button:hover,
 .file-input:hover {
   filter: brightness(0.95);
   transform: translateY(-1px);
+}
+
+div[class*="st-key-period_shortcut_"] button {
+  min-height: 30px !important;
+  padding: 0.2rem 0.58rem !important;
+  border-radius: 999px !important;
+  background: #ffffff !important;
+  color: #1f2937 !important;
+  border: 1px solid #d1d5db !important;
+  box-shadow: none !important;
+  font-size: 0.72rem !important;
+  font-weight: 500 !important;
+  letter-spacing: -0.01em;
+}
+
+div[class*="st-key-period_shortcut_"] {
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+
+div[class*="st-key-period_shortcut_"] button:hover {
+  background: #f3f4f6 !important;
+  filter: none !important;
+  transform: translateY(0);
+}
+
+div[class*="st-key-period_nav_prev_"] button,
+div[class*="st-key-period_nav_next_"] button {
+  min-height: 30px !important;
+  height: 30px !important;
+  padding: 0 !important;
+  border-radius: 999px !important;
+  background: #ffffff !important;
+  color: #334155 !important;
+  border: 1px solid #d1d5db !important;
+  box-shadow: none !important;
+  font-size: 0.72rem !important;
+  font-weight: 700 !important;
+}
+
+div[class*="st-key-period_nav_prev_"] button:hover,
+div[class*="st-key-period_nav_next_"] button:hover {
+  background: #f3f4f6 !important;
+  filter: none !important;
+  transform: translateY(0);
 }
 
 button.secondary {
@@ -693,7 +828,7 @@ td.empty {
   }
 
   .status-row-gap {
-    height: 8px;
+    height: 1px;
   }
 
 }

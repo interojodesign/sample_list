@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+!app_compiled.pyc
 .venv/
 sample-list.csv
 sample-list.xlsx
