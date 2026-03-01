@@ -428,6 +428,7 @@ if hasattr(compiled_app, "render_chart_card"):
             if isinstance(title, str) and "샘플 종합 진도 현황" in title:
                 total_label = None
                 total_count = 0
+                max_stage_count = 0
                 for trace in getattr(fig, "data", []):
                     if getattr(trace, "type", "") != "bar":
                         continue
@@ -443,6 +444,10 @@ if hasattr(compiled_app, "render_chart_card"):
                     y_values = getattr(trace, "y", None) or []
                     try:
                         total_count += sum(int(v) for v in y_values if v is not None)
+                        for v in y_values:
+                            if v is None:
+                                continue
+                            max_stage_count = max(max_stage_count, int(v))
                     except Exception:
                         pass
                     # Force bar labels to count-only text (e.g., "17건"), removing any extra phrases.
@@ -464,6 +469,24 @@ if hasattr(compiled_app, "render_chart_card"):
                             categoryorder="array",
                             categoryarray=category_order,
                         )
+                except Exception:
+                    pass
+                # Keep labels at original position; lift only the baseline (y=0) upward.
+                try:
+                    line_lift = max(0.6, max_stage_count * 0.05) if max_stage_count else 0.6
+                    y_top = max(1.0, max_stage_count * 1.08)
+                    fig.update_yaxes(
+                        range=[-line_lift, y_top],
+                        zeroline=True,
+                        zerolinecolor="#111827",
+                        zerolinewidth=1.2,
+                    )
+                    fig.update_xaxes(
+                        showline=False,
+                        ticklabelposition="outside",
+                        ticklabelstandoff=0,
+                        automargin=True,
+                    )
                 except Exception:
                     pass
                 # Preserve any remaining non-total annotations; totals are already removed globally above.
