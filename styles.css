@@ -384,12 +384,23 @@ button.factory-detail-btn:hover {
   margin-top: 1.6rem;
 }
 
+.st-key-status_panel,
+.st-key-status_panel[data-testid="stVerticalBlock"],
 .st-key-status_panel [data-testid="stVerticalBlock"] {
-  gap: 0.08rem !important;
+  gap: 0 !important;
+  row-gap: 0 !important;
 }
 
+.st-key-status_panel > div,
+.st-key-status_panel[data-testid="stVerticalBlock"] > div,
 .st-key-status_panel [data-testid="stVerticalBlock"] > div {
   margin: 0 !important;
+  padding: 0 !important;
+}
+
+.st-key-status_panel [data-testid="stElementContainer"] {
+  margin: 0 !important;
+  padding: 0 !important;
 }
 
 .st-key-status_panel [data-testid="stHorizontalBlock"] {
@@ -592,7 +603,20 @@ div[class*="st-key-stage_popup_native_"] {
 }
 
 .status-row-gap {
-  height: 1px;
+  display: none !important;
+  height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.st-key-status_panel [data-testid="stMarkdownContainer"] {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.st-key-status_panel [data-testid="stMarkdownContainer"] p {
+  margin: 0 !important;
+  padding: 0 !important;
 }
 
 .st-key-status_panel div[class*="st-key-stage_popup_native_"] button {
@@ -992,7 +1016,9 @@ td.empty {
   }
 
   .status-row-gap {
-    height: 1px;
+    height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
   }
 
 }
