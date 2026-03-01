@@ -34,6 +34,86 @@ if hasattr(compiled_app, "BASE_DIR"):
 if hasattr(compiled_app, "LAST_FILE_RECORD"):
     compiled_app.LAST_FILE_RECORD = ROOT_DIR / ".last-used-file"
 
+
+def _ensure_default_data_file_fallback() -> None:
+    """Prefer sample-list.xlsx over implicit default CSV."""
+    record_path = ROOT_DIR / ".last-used-file"
+    default_csv = ROOT_DIR / "sample-list.csv"
+    default_xlsx = ROOT_DIR / "sample-list.xlsx"
+    if not default_xlsx.exists():
+        return
+    try:
+        if record_path.exists():
+            stored = record_path.read_text(encoding="utf-8").strip()
+            if stored in {"sample-list.csv", "./sample-list.csv", ".\\sample-list.csv"}:
+                record_path.write_text("sample-list.xlsx", encoding="utf-8")
+                return
+            if stored:
+                stored_path = Path(stored)
+                if not stored_path.is_absolute():
+                    stored_path = ROOT_DIR / stored_path
+                if stored_path.exists():
+                    return
+        if default_csv.exists():
+            return
+        record_path.write_text("sample-list.xlsx", encoding="utf-8")
+    except Exception:
+        # Non-fatal: app can still run with manual file selection.
+        pass
+
+
+_ensure_default_data_file_fallback()
+
+if hasattr(compiled_app, "get_last_file_path"):
+    _orig_get_last_file_path = compiled_app.get_last_file_path
+
+    def _get_last_file_path_prefer_xlsx():
+        preferred_xlsx = ROOT_DIR / "sample-list.xlsx"
+        if preferred_xlsx.exists():
+            return preferred_xlsx
+        return _orig_get_last_file_path()
+
+    compiled_app.get_last_file_path = _get_last_file_path_prefer_xlsx
+
+if hasattr(compiled_app, "get_current_file_path"):
+    _orig_get_current_file_path = compiled_app.get_current_file_path
+
+    def _get_current_file_path_prefer_xlsx():
+        path = _orig_get_current_file_path()
+        preferred_xlsx = ROOT_DIR / "sample-list.xlsx"
+        if not preferred_xlsx.exists():
+            return path
+        try:
+            current_path = Path(path)
+            if not current_path.is_absolute():
+                current_path = ROOT_DIR / current_path
+            if current_path.name.lower() == "sample-list.csv":
+                return preferred_xlsx
+        except Exception:
+            return preferred_xlsx
+        return path
+
+    compiled_app.get_current_file_path = _get_current_file_path_prefer_xlsx
+
+if hasattr(compiled_app, "init_state"):
+    _orig_init_state = compiled_app.init_state
+
+    def _init_state_prefer_xlsx(*args, **kwargs):
+        result = _orig_init_state(*args, **kwargs)
+        preferred_xlsx = ROOT_DIR / "sample-list.xlsx"
+        if preferred_xlsx.exists():
+            try:
+                compiled_app.st.session_state["current_file"] = str(preferred_xlsx)
+                (ROOT_DIR / ".last-used-file").write_text(
+                    "sample-list.xlsx",
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+        return result
+
+    compiled_app.init_state = _init_state_prefer_xlsx
+
 # Open stage dialog only right after explicit "목록보기" click.
 if hasattr(compiled_app, "set_query_params"):
     _orig_set_query_params = compiled_app.set_query_params
