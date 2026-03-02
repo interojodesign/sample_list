@@ -325,6 +325,116 @@ if hasattr(compiled_app, "prepare_dashboard_data") and hasattr(compiled_app, "pd
 
     compiled_app.prepare_dashboard_data = _prepare_dashboard_data_with_missing_shipment_overlay
 
+if hasattr(compiled_app, "prepare_limit_dashboard_data") and hasattr(compiled_app, "pd"):
+    _orig_prepare_limit_dashboard_data = compiled_app.prepare_limit_dashboard_data
+
+    def _prepare_limit_dashboard_data_with_confirm_override(df, start_date, end_date):
+        result = _orig_prepare_limit_dashboard_data(df, start_date, end_date)
+        try:
+            pd_obj = compiled_app.pd
+            if not isinstance(result, tuple) or len(result) != 6:
+                return result
+
+            (
+                eligible_confirmed,
+                eligible_ready,
+                eligible_pending,
+                confirmed_df,
+                ready_df,
+                pending_df,
+            ) = result
+
+            limit_confirm_col = getattr(compiled_app, "LIMIT_CONFIRM_COLUMN", None)
+            if not isinstance(limit_confirm_col, str) or not limit_confirm_col.strip():
+                return result
+            limit_confirm_col = limit_confirm_col.strip()
+            parse_date_fn = getattr(compiled_app, "parse_date", None)
+
+            def _empty_like(frame):
+                if frame is None:
+                    return pd_obj.DataFrame()
+                return frame.iloc[0:0].copy()
+
+            def _merge_unique(base, extra):
+                if base is None and extra is None:
+                    return pd_obj.DataFrame()
+                if base is None:
+                    return extra.copy()
+                if extra is None or getattr(extra, "empty", True):
+                    return base
+                merged = pd_obj.concat([base, extra], axis=0)
+                return merged.loc[~merged.index.duplicated(keep="first")].copy()
+
+            def _extract_force_confirmed(*frames):
+                valid_frames = [
+                    frame
+                    for frame in frames
+                    if frame is not None and hasattr(frame, "columns") and hasattr(frame, "index")
+                ]
+                if not valid_frames:
+                    return pd_obj.DataFrame()
+
+                combined = pd_obj.concat(valid_frames, axis=0)
+                if combined.empty:
+                    return combined
+                combined = combined.loc[~combined.index.duplicated(keep="first")].copy()
+
+                if "__limit_confirm_date__" in combined.columns:
+                    mask = combined["__limit_confirm_date__"].notna()
+                elif limit_confirm_col in combined.columns:
+                    if callable(parse_date_fn):
+                        mask = combined[limit_confirm_col].apply(
+                            lambda value: parse_date_fn(value) is not None
+                        )
+                    else:
+                        mask = pd_obj.to_datetime(
+                            combined[limit_confirm_col],
+                            errors="coerce",
+                        ).notna()
+                else:
+                    return combined.iloc[0:0]
+
+                return combined.loc[mask].copy()
+
+            forced_all = _extract_force_confirmed(confirmed_df, ready_df, pending_df)
+            if forced_all.empty:
+                return result
+
+            forced_eligible = _extract_force_confirmed(
+                eligible_confirmed,
+                eligible_ready,
+                eligible_pending,
+            )
+
+            confirmed_df_new = _merge_unique(confirmed_df, forced_all)
+            ready_df_new = _merge_unique(ready_df, forced_all)
+            pending_df_new = (
+                pending_df.drop(index=forced_all.index, errors="ignore").copy()
+                if pending_df is not None
+                else _empty_like(forced_all)
+            )
+
+            eligible_confirmed_new = _merge_unique(eligible_confirmed, forced_eligible)
+            eligible_ready_new = _merge_unique(eligible_ready, forced_eligible)
+            eligible_pending_new = (
+                eligible_pending.drop(index=forced_eligible.index, errors="ignore").copy()
+                if eligible_pending is not None
+                else _empty_like(forced_eligible)
+            )
+
+            return (
+                eligible_confirmed_new,
+                eligible_ready_new,
+                eligible_pending_new,
+                confirmed_df_new,
+                ready_df_new,
+                pending_df_new,
+            )
+        except Exception:
+            return result
+
+    compiled_app.prepare_limit_dashboard_data = _prepare_limit_dashboard_data_with_confirm_override
+
 if hasattr(compiled_app, "build_duration_entries") and hasattr(compiled_app, "pd"):
     _orig_build_duration_entries = compiled_app.build_duration_entries
     _pd = compiled_app.pd
@@ -1112,13 +1222,17 @@ def _ensure_default_route_to_sample_dashboard() -> None:
     try:
         st_obj = compiled_app.st
         params = st_obj.query_params
-        has_explicit_route = any(
-            key in params for key in ("view", "nav", "factory", "stage_idx")
-        )
-        if has_explicit_route:
+        # Apply a one-time bootstrap redirect to sample dashboard on fresh app entry.
+        # This also fixes cases where stale `view=admin` remains in browser query params.
+        if bool(st_obj.session_state.get("_default_sample_route_bootstrapped", False)):
+            return
+        has_deep_link = any(key in params for key in ("factory", "stage_idx"))
+        if has_deep_link:
+            st_obj.session_state["_default_sample_route_bootstrapped"] = True
             return
         st_obj.session_state["sidebar_nav_selection"] = 0
         st_obj.session_state["__last_sidebar_nav_selection"] = 0
+        st_obj.session_state["_default_sample_route_bootstrapped"] = True
         params.clear()
         params["view"] = "sample"
         params["nav"] = "0"
