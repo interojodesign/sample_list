@@ -1106,6 +1106,25 @@ def _inject_runtime_dom_tweaks() -> None:
     # Intentionally no-op: DOM tweaks disabled in favor of render-level adjustments.
     return
 
+
+def _ensure_default_route_to_sample_dashboard() -> None:
+    """When opening bare root URL, default to sample dashboard instead of admin."""
+    try:
+        st_obj = compiled_app.st
+        params = st_obj.query_params
+        has_explicit_route = any(
+            key in params for key in ("view", "nav", "factory", "stage_idx")
+        )
+        if has_explicit_route:
+            return
+        st_obj.session_state["sidebar_nav_selection"] = 0
+        st_obj.session_state["__last_sidebar_nav_selection"] = 0
+        params.clear()
+        params["view"] = "sample"
+        params["nav"] = "0"
+    except Exception:
+        pass
+
 if hasattr(compiled_app, "main"):
     try:
         allow_once = bool(compiled_app.st.session_state.pop("_stage_dialog_open_once", False))
@@ -1118,6 +1137,7 @@ if hasattr(compiled_app, "main"):
                 compiled_app.st.query_params[key] = value
     except Exception:
         pass
+    _ensure_default_route_to_sample_dashboard()
     compiled_app.main()
     _inject_runtime_dom_tweaks()
 else:
