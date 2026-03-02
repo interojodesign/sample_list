@@ -145,6 +145,7 @@ _STAGE_TONE_PALETTE = {
     "보류": "#B4BCCB",
     "완료": "#D3D8E2",
 }
+_STATUS_HINT_TEXT = "오른쪽 목록보기 버튼을 클릭하면 해당 단계의 샘플 목록이 팝업으로 열립니다."
 
 
 def _normalize_stage_label(value: str) -> str:
@@ -176,6 +177,20 @@ if hasattr(compiled_app, "determine_stage"):
         return _normalize_stage_label(_orig_determine_stage(*args, **kwargs))
 
     compiled_app.determine_stage = _determine_stage_renamed
+
+if hasattr(compiled_app, "go") and hasattr(compiled_app.go, "Figure"):
+    _orig_figure_add_annotation = compiled_app.go.Figure.add_annotation
+
+    def _add_annotation_without_total_count(self, *args, **kwargs):
+        text = kwargs.get("text")
+        if text is None and args and isinstance(args[0], dict):
+            text = args[0].get("text")
+        plain = re.sub(r"<[^>]+>", "", str(text or "")).strip()
+        if re.fullmatch(r"총\s*\d+\s*건", plain):
+            return self
+        return _orig_figure_add_annotation(self, *args, **kwargs)
+
+    compiled_app.go.Figure.add_annotation = _add_annotation_without_total_count
 
 
 def _as_date(value) -> date:
@@ -396,69 +411,94 @@ if hasattr(compiled_app, "render_chart_card"):
         match = re.search(r"\d+\s*건", plain)
         return match.group(0) if match else ""
 
+    def _to_sequence(value):
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple)):
+            return list(value)
+        if isinstance(value, str):
+            return [value]
+        try:
+            return list(value)
+        except Exception:
+            return [value]
+
     def _render_chart_card_with_bold_labels(fig, *args, **kwargs):
         try:
             has_bar_trace = False
-            for trace in getattr(fig, "data", []):
-                if getattr(trace, "type", "") != "bar":
-                    # Remove "총 N건" even on non-bar traces if text exists.
+            for trace in list(getattr(fig, "data", []) or []):
+                try:
+                    trace_type = getattr(trace, "type", "")
                     text_values = getattr(trace, "text", None)
                     if isinstance(text_values, (list, tuple)):
                         trace.text = [_strip_total_from_bar_text(v) for v in text_values]
                     elif text_values is not None:
-                        trace.text = _strip_total_from_bar_text(text_values)
-                    continue
-                has_bar_trace = True
-                text_values = getattr(trace, "text", None)
-                if isinstance(text_values, (list, tuple)):
-                    trace.text = [_strip_total_from_bar_text(v) for v in text_values]
-                elif text_values is not None:
-                    trace.text = _strip_total_from_bar_text(text_values)
-                # Normalize bar labels to count-only text derived from y values.
-                y_values = getattr(trace, "y", None) or []
-                try:
-                    trace.text = [f"{int(v)}건" if int(v) > 0 else "" for v in y_values]
-                except Exception:
-                    pass
-                trace.texttemplate = "<b>%{text}</b>"
-                if getattr(trace, "textfont", None):
-                    trace.textfont.size = max(13, int(trace.textfont.size or 13))
-                else:
-                    trace.textfont = dict(size=13, color="#0f172a")
+                        seq = _to_sequence(text_values)
+                        trace.text = (
+                            [_strip_total_from_bar_text(v) for v in seq]
+                            if len(seq) > 1
+                            else _strip_total_from_bar_text(text_values)
+                        )
 
-            # Remove any in-chart total annotation like "총 29건" from bar charts.
+                    if trace_type != "bar":
+                        continue
+
+                    has_bar_trace = True
+                    y_values = _to_sequence(getattr(trace, "y", None))
+                    trace.text = [
+                        f"{int(v)}건" if str(v).strip() and int(v) > 0 else ""
+                        for v in y_values
+                    ]
+                    trace.texttemplate = "<b>%{text}</b>"
+                    if getattr(trace, "textfont", None):
+                        current_size = getattr(trace.textfont, "size", 13) or 13
+                        trace.textfont.size = max(13, int(current_size))
+                    else:
+                        trace.textfont = dict(size=13, color="#0f172a")
+                except Exception:
+                    continue
+
+            # Remove in-chart total annotation like "총 29건".
             if has_bar_trace:
-                fig.update_layout(annotations=[])
+                kept_annotations = []
+                for ann in list(getattr(fig.layout, "annotations", []) or []):
+                    ann_text = getattr(ann, "text", "")
+                    plain_text = re.sub(r"<[^>]+>", "", str(ann_text)).strip()
+                    if re.search(r"총\s*\d+\s*건", plain_text):
+                        continue
+                    kept_annotations.append(ann)
+                fig.update_layout(annotations=kept_annotations)
 
             title = kwargs.get("title")
             if isinstance(title, str) and "샘플 종합 진도 현황" in title:
-                total_label = None
                 total_count = 0
                 max_stage_count = 0
-                for trace in getattr(fig, "data", []):
+                for trace in list(getattr(fig, "data", []) or []):
                     if getattr(trace, "type", "") != "bar":
                         continue
                     # Rename x-axis label for the missing-shipment bucket.
                     try:
-                        x_values = list(getattr(trace, "x", []) or [])
+                        x_values = _to_sequence(getattr(trace, "x", None))
                         trace.x = [
                             "발송일 미확정" if str(v).strip() in {"미확정", "발송일 미확정", _NEW_MISSING_STAGE_LABEL} else v
                             for v in x_values
                         ]
                     except Exception:
                         pass
-                    y_values = getattr(trace, "y", None) or []
-                    try:
-                        total_count += sum(int(v) for v in y_values if v is not None)
-                        for v in y_values:
-                            if v is None:
-                                continue
-                            max_stage_count = max(max_stage_count, int(v))
-                    except Exception:
-                        pass
+                    y_values = _to_sequence(getattr(trace, "y", None))
+                    for v in y_values:
+                        try:
+                            int_value = int(v)
+                        except Exception:
+                            continue
+                        total_count += int_value
+                        max_stage_count = max(max_stage_count, int_value)
                     # Force bar labels to count-only text (e.g., "17건"), removing any extra phrases.
                     try:
-                        trace.text = [f"{int(v)}건" if int(v) > 0 else "" for v in y_values]
+                        trace.text = [
+                            f"{int(v)}건" if str(v).strip() and int(v) > 0 else ""
+                            for v in y_values
+                        ]
                     except Exception:
                         pass
                 # Keep missing-shipment category pinned to the far left.
@@ -495,21 +535,11 @@ if hasattr(compiled_app, "render_chart_card"):
                     )
                 except Exception:
                     pass
-                # Preserve any remaining non-total annotations; totals are already removed globally above.
-                annotations = list(getattr(fig.layout, "annotations", []) or [])
-                for ann in annotations:
-                    ann_text = getattr(ann, "text", "")
-                    plain_text = re.sub(r"<[^>]+>", "", str(ann_text)).strip()
-                    if re.search(r"총\s*\d+\s*건", plain_text):
-                        total_label = plain_text
-
                 base_title = re.sub(r"<[^>]+>", "", title).strip()
                 if total_count > 0:
-                    total_label = f"총 {total_count}건"
-                if total_label:
                     kwargs["title"] = (
                         "<span style='font-size:0.94rem;font-weight:700;color:#4b5563;'>"
-                        f"{base_title} ({total_label})"
+                        f"{base_title} (총 {total_count}건)"
                         "</span>"
                     )
         except Exception:
@@ -518,13 +548,87 @@ if hasattr(compiled_app, "render_chart_card"):
 
     compiled_app.render_chart_card = _render_chart_card_with_bold_labels
 
+if hasattr(compiled_app, "render_sample_dashboard"):
+    _orig_render_sample_dashboard = compiled_app.render_sample_dashboard
+
+    def _render_sample_dashboard_with_hint_relocated():
+        st_obj = compiled_app.st
+        original_caption = st_obj.caption
+        suppressed_hint = {"value": False}
+
+        def _caption_override(body=None, *args, **kwargs):
+            if str(body or "").strip() == _STATUS_HINT_TEXT:
+                suppressed_hint["value"] = True
+                return None
+            return original_caption(body, *args, **kwargs)
+
+        st_obj.caption = _caption_override
+        try:
+            result = _orig_render_sample_dashboard()
+        finally:
+            st_obj.caption = original_caption
+
+        if suppressed_hint["value"]:
+            _, right_col = st_obj.columns([1.35, 0.95])
+            with right_col:
+                st_obj.markdown(
+                    (
+                        "<div style='margin-top:-12px;color:#6b7280;font-size:0.9rem;"
+                        "line-height:1.45;'>"
+                        f"{_STATUS_HINT_TEXT}"
+                        "</div>"
+                    ),
+                    unsafe_allow_html=True,
+                )
+        return result
+
+    compiled_app.render_sample_dashboard = _render_sample_dashboard_with_hint_relocated
+
+# Force C/S/FRP detail page chart layout without relying on runtime DOM class injection.
+if hasattr(compiled_app, "render_factory_detail_page"):
+    _orig_render_factory_detail_page = compiled_app.render_factory_detail_page
+
+    def _render_factory_detail_page_with_fixed_stage_width(factory_name):
+        st_obj = compiled_app.st
+        orig_columns = st_obj.columns
+        orig_render_chart_card = getattr(compiled_app, "render_chart_card", None)
+        chart_row_adjusted = False
+
+        def _columns_override(spec, *args, **kwargs):
+            nonlocal chart_row_adjusted
+            # In factory detail rendering, the only st.columns(2) call is the stage/trend chart row.
+            if spec == 2 and not chart_row_adjusted:
+                chart_row_adjusted = True
+                return orig_columns([1.72, 1], *args, **kwargs)
+            return orig_columns(spec, *args, **kwargs)
+
+        def _render_chart_card_override(fig, *args, **kwargs):
+            title = kwargs.get("title")
+            if isinstance(title, str) and title.endswith("단계별 현황"):
+                kwargs["card_width"] = 720
+                kwargs["chart_width"] = max(int(kwargs.get("chart_width", 560)), 680)
+                kwargs["chart_height"] = max(int(kwargs.get("chart_height", 320)), 340)
+            return orig_render_chart_card(fig, *args, **kwargs)
+
+        st_obj.columns = _columns_override
+        if callable(orig_render_chart_card):
+            compiled_app.render_chart_card = _render_chart_card_override
+        try:
+            return _orig_render_factory_detail_page(factory_name)
+        finally:
+            st_obj.columns = orig_columns
+            if callable(orig_render_chart_card):
+                compiled_app.render_chart_card = orig_render_chart_card
+
+    compiled_app.render_factory_detail_page = _render_factory_detail_page_with_fixed_stage_width
+
 # Final safety net: strip duplicated "총 N건" labels from Plotly HTML payload.
 if hasattr(compiled_app, "components") and hasattr(compiled_app.components, "html"):
     _orig_components_html = compiled_app.components.html
 
     def _components_html_without_total_duplicates(html_str, *args, **kwargs):
         try:
-            if isinstance(html_str, str) and "inline-chart-body" in html_str and "plotly" in html_str:
+            if isinstance(html_str, str) and "plotly" in html_str:
                 marker = "Plotly.newPlot"
                 split_idx = html_str.find(marker)
                 if split_idx >= 0:
@@ -537,56 +641,16 @@ if hasattr(compiled_app, "components") and hasattr(compiled_app.components, "htm
                     html_str = prefix + script_part
                 else:
                     html_str = re.sub(r"총\\s*\\d+\\s*건", "", html_str)
-
-                cleanup_script = """
-<script>
-(function () {
-  function stripTotalLabels(root) {
-    if (!root) return;
-    // Remove standalone total labels.
-    root.querySelectorAll('g.pointtext text, g.annotation text').forEach(function (el) {
-      var txt = (el.textContent || '').trim();
-      if (/^총\\s*\\d+\\s*건$/.test(txt)) {
-        el.remove();
-      }
-    });
-    // Remove only the "총 N건" tspan when a multi-line label exists.
-    root.querySelectorAll('g.pointtext text tspan, g.annotation text tspan').forEach(function (el) {
-      var txt = (el.textContent || '').trim();
-      if (/^총\\s*\\d+\\s*건$/.test(txt)) {
-        el.remove();
-      }
-    });
-    // Broad fallback for any Plotly text layer.
-    root.querySelectorAll('.js-plotly-plot text, .js-plotly-plot tspan, svg text, svg tspan').forEach(function (el) {
-      var txt = (el.textContent || '').trim();
-      if (/^총\\s*\\d+\\s*건$/.test(txt)) {
-        el.remove();
-      }
-    });
-  }
-
-  function run() {
-    var roots = document.querySelectorAll('.inline-chart-body, .plotly, .js-plotly-plot');
-    roots.forEach(stripTotalLabels);
-  }
-
-  run();
-  setTimeout(run, 60);
-  setTimeout(run, 180);
-  setTimeout(run, 420);
-
-  var obs = new MutationObserver(function () { run(); });
-  obs.observe(document.body, { childList: true, subtree: true });
-})();
-</script>
-"""
-                html_str += cleanup_script
         except Exception:
             pass
         return _orig_components_html(html_str, *args, **kwargs)
 
     compiled_app.components.html = _components_html_without_total_duplicates
+
+
+def _inject_runtime_dom_tweaks() -> None:
+    # Intentionally no-op: DOM tweaks disabled in favor of render-level adjustments.
+    return
 
 if hasattr(compiled_app, "main"):
     try:
@@ -601,5 +665,6 @@ if hasattr(compiled_app, "main"):
     except Exception:
         pass
     compiled_app.main()
+    _inject_runtime_dom_tweaks()
 else:
     raise AttributeError("Compiled app module has no main()")
