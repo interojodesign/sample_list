@@ -178,6 +178,73 @@ if hasattr(compiled_app, "determine_stage"):
 
     compiled_app.determine_stage = _determine_stage_renamed
 
+if hasattr(compiled_app, "build_duration_entries") and hasattr(compiled_app, "pd"):
+    _orig_build_duration_entries = compiled_app.build_duration_entries
+    _pd = compiled_app.pd
+
+    def _build_duration_entries_with_earliest_start(df):
+        try:
+            if df is None or getattr(df, "empty", True):
+                return []
+            local = df.copy()
+            columns = set(local.columns)
+
+            confirm_col = "시안 컨펌일" if "시안 컨펌일" in columns else None
+            print_start_col = "인쇄 시작일" if "인쇄 시작일" in columns else None
+
+            end_col = None
+            for candidate in ("발송 예정일", "시안 발송일", "발송일"):
+                if candidate in columns:
+                    end_col = candidate
+                    break
+
+            if end_col is None:
+                return _orig_build_duration_entries(df)
+
+            end_series = _pd.to_datetime(local[end_col], errors="coerce")
+            start_candidates = []
+            if confirm_col is not None:
+                start_candidates.append(_pd.to_datetime(local[confirm_col], errors="coerce"))
+            if print_start_col is not None:
+                start_candidates.append(_pd.to_datetime(local[print_start_col], errors="coerce"))
+
+            if not start_candidates:
+                return _orig_build_duration_entries(df)
+
+            start_frame = _pd.concat(start_candidates, axis=1)
+            start_series = start_frame.min(axis=1, skipna=True)
+
+            valid_mask = start_series.notna() & end_series.notna()
+            if not valid_mask.any():
+                return []
+
+            local = local.loc[valid_mask].copy()
+            start_series = start_series.loc[valid_mask]
+            end_series = end_series.loc[valid_mask]
+
+            durations = (end_series - start_series).dt.days
+            valid_duration_mask = durations.notna()
+            local = local.loc[valid_duration_mask].copy()
+            start_series = start_series.loc[valid_duration_mask]
+            end_series = end_series.loc[valid_duration_mask]
+            durations = durations.loc[valid_duration_mask].clip(lower=0)
+
+            entries = []
+            for idx in local.index:
+                entries.append(
+                    {
+                        "start": start_series.loc[idx],
+                        "end": end_series.loc[idx],
+                        "days": int(durations.loc[idx]),
+                    }
+                )
+            entries.sort(key=lambda item: item.get("start"))
+            return entries
+        except Exception:
+            return _orig_build_duration_entries(df)
+
+    compiled_app.build_duration_entries = _build_duration_entries_with_earliest_start
+
 if hasattr(compiled_app, "go") and hasattr(compiled_app.go, "Figure"):
     _orig_figure_add_annotation = compiled_app.go.Figure.add_annotation
 
@@ -470,7 +537,12 @@ if hasattr(compiled_app, "render_chart_card"):
                 fig.update_layout(annotations=kept_annotations)
 
             title = kwargs.get("title")
-            if isinstance(title, str) and "샘플 종합 진도 현황" in title:
+            plain_title = re.sub(r"<[^>]+>", "", str(title or "")).strip()
+            is_main_stage_chart = isinstance(title, str) and "샘플 종합 진도 현황" in title
+            is_detail_stage_chart = bool(plain_title) and (
+                plain_title.endswith("단계별 현황") or plain_title.endswith("샘플 현황")
+            )
+            if is_main_stage_chart or is_detail_stage_chart:
                 total_count = 0
                 max_stage_count = 0
                 for trace in list(getattr(fig, "data", []) or []):
@@ -480,7 +552,9 @@ if hasattr(compiled_app, "render_chart_card"):
                     try:
                         x_values = _to_sequence(getattr(trace, "x", None))
                         trace.x = [
-                            "발송일 미확정" if str(v).strip() in {"미확정", "발송일 미확정", _NEW_MISSING_STAGE_LABEL} else v
+                            "발송일 미확정"
+                            if str(v).strip() in {"미확정", "발송일 미확정", "샘플 발송일 미확정", _NEW_MISSING_STAGE_LABEL}
+                            else v
                             for v in x_values
                         ]
                     except Exception:
@@ -519,7 +593,8 @@ if hasattr(compiled_app, "render_chart_card"):
                     pass
                 # Keep labels at original position; lift only the baseline (y=0) upward.
                 try:
-                    line_lift = max(0.6, max_stage_count * 0.05) if max_stage_count else 0.6
+                    # Keep a consistent baseline ratio across factories and the main chart.
+                    line_lift = (max_stage_count * 0.05) if max_stage_count else 0.2
                     y_top = max(1.0, max_stage_count * 1.08)
                     fig.update_yaxes(
                         range=[-line_lift, y_top],
@@ -529,14 +604,15 @@ if hasattr(compiled_app, "render_chart_card"):
                     )
                     fig.update_xaxes(
                         showline=False,
+                        tickangle=0,
                         ticklabelposition="outside",
                         ticklabelstandoff=0,
                         automargin=True,
                     )
                 except Exception:
                     pass
-                base_title = re.sub(r"<[^>]+>", "", title).strip()
-                if total_count > 0:
+                base_title = plain_title
+                if is_main_stage_chart and total_count > 0:
                     kwargs["title"] = (
                         "<span style='font-size:0.94rem;font-weight:700;color:#4b5563;'>"
                         f"{base_title} (총 {total_count}건)"
@@ -592,6 +668,7 @@ if hasattr(compiled_app, "render_factory_detail_page"):
         st_obj = compiled_app.st
         orig_columns = st_obj.columns
         orig_render_chart_card = getattr(compiled_app, "render_chart_card", None)
+        orig_render_duration_trend_chart = getattr(compiled_app, "render_duration_trend_chart", None)
         chart_row_adjusted = False
 
         def _columns_override(spec, *args, **kwargs):
@@ -599,26 +676,244 @@ if hasattr(compiled_app, "render_factory_detail_page"):
             # In factory detail rendering, the only st.columns(2) call is the stage/trend chart row.
             if spec == 2 and not chart_row_adjusted:
                 chart_row_adjusted = True
-                return orig_columns([1.72, 1], *args, **kwargs)
+                return orig_columns([1.48, 1.22], *args, **kwargs)
             return orig_columns(spec, *args, **kwargs)
 
         def _render_chart_card_override(fig, *args, **kwargs):
-            title = kwargs.get("title")
-            if isinstance(title, str) and title.endswith("단계별 현황"):
-                kwargs["card_width"] = 720
-                kwargs["chart_width"] = max(int(kwargs.get("chart_width", 560)), 680)
-                kwargs["chart_height"] = max(int(kwargs.get("chart_height", 320)), 340)
+            title = kwargs.get("title") or ""
+            plain_title = re.sub(r"<[^>]+>", "", str(title)).strip()
+            if plain_title.endswith("단계별 현황"):
+                # Match the same geometry as "샘플 종합 진도 현황".
+                kwargs["title"] = re.sub(r"단계별 현황$", "샘플 현황", plain_title)
+                kwargs["card_width"] = None
+                kwargs["chart_width"] = 670
+                kwargs["chart_height"] = 298
+                try:
+                    fig.update_layout(
+                        margin=dict(l=22, r=8, t=10, b=34),
+                    )
+                    fig.update_xaxes(automargin=True)
+                    fig.update_yaxes(automargin=True)
+                except Exception:
+                    pass
+            if "소요일 추이" in plain_title:
+                # Prevent clipping in the narrower right column.
+                kwargs["card_width"] = None
+                kwargs["chart_width"] = 500
+                kwargs["chart_height"] = 298
+                try:
+                    pd_obj = getattr(compiled_app, "pd", None)
+                    parsed_x = []
+                    parsed_end = []
+                    parsed_y = []
+                    points = []
+                    if pd_obj is not None:
+                        for trace in list(getattr(fig, "data", []) or []):
+                            x_seq = _to_sequence(getattr(trace, "x", None))
+                            y_seq = _to_sequence(getattr(trace, "y", None))
+                            for x_val in x_seq:
+                                ts = pd_obj.to_datetime(x_val, errors="coerce")
+                                if not pd_obj.isna(ts):
+                                    parsed_x.append(ts)
+                            pair_len = min(len(x_seq), len(y_seq))
+                            for i in range(pair_len):
+                                ts_point = pd_obj.to_datetime(x_seq[i], errors="coerce")
+                                if pd_obj.isna(ts_point):
+                                    continue
+                                try:
+                                    y_point = float(y_seq[i])
+                                except Exception:
+                                    continue
+                                points.append((ts_point, y_point))
+                            for end_val in _to_sequence(getattr(trace, "customdata", None)):
+                                candidate = end_val
+                                if isinstance(end_val, (list, tuple)) and end_val:
+                                    candidate = end_val[0]
+                                ts_end = pd_obj.to_datetime(candidate, errors="coerce")
+                                if not pd_obj.isna(ts_end):
+                                    parsed_end.append(ts_end)
+                            for y_val in _to_sequence(getattr(trace, "y", None)):
+                                try:
+                                    parsed_y.append(float(y_val))
+                                except Exception:
+                                    continue
+
+                    x_range = None
+                    tick_vals = None
+                    tick_text = None
+                    if parsed_x and pd_obj is not None:
+                        anchors = list(parsed_x)
+                        if parsed_end:
+                            anchors.extend(parsed_end)
+                        latest = max(anchors)
+                        latest_month_start = pd_obj.Timestamp(latest.year, latest.month, 1)
+                        reference_month_start = latest_month_start
+                        try:
+                            range_ends = []
+                            for key, value in dict(getattr(st_obj, "session_state", {}) or {}).items():
+                                if "date_range" not in str(key):
+                                    continue
+                                if isinstance(value, (list, tuple)) and len(value) == 2:
+                                    end_value = value[1] if value[1] is not None else value[0]
+                                    ts_end = pd_obj.to_datetime(end_value, errors="coerce")
+                                    if not pd_obj.isna(ts_end):
+                                        range_ends.append(ts_end)
+                            if range_ends:
+                                selected_end = max(range_ends)
+                                selected_month_start = pd_obj.Timestamp(selected_end.year, selected_end.month, 1)
+                                if selected_month_start > reference_month_start:
+                                    reference_month_start = selected_month_start
+                        except Exception:
+                            pass
+                        try:
+                            now_ts = pd_obj.Timestamp.now()
+                            now_month_start = pd_obj.Timestamp(now_ts.year, now_ts.month, 1)
+                            if now_month_start > reference_month_start:
+                                reference_month_start = now_month_start
+                        except Exception:
+                            pass
+                        window_start = reference_month_start - pd_obj.DateOffset(months=2)
+                        window_end = reference_month_start + pd_obj.offsets.MonthEnd(1)
+                        tick_vals = [window_start + pd_obj.DateOffset(months=i) for i in range(3)]
+                        tick_text = [f"{ts.year}년 {ts.month:02d}월" for ts in tick_vals]
+                        # Nudge month labels slightly further right for visual centering.
+                        x_range = [window_start - pd_obj.Timedelta(days=18), window_end]
+
+                    y_top = None
+                    y_lift = None
+                    if parsed_y:
+                        y_max = max(parsed_y)
+                        # Keep enough headroom so labels don't collide with the average text line.
+                        y_top = max(1.0, y_max * 1.24)
+                        y_lift = y_max * 0.05 if y_max > 0 else 0.2
+
+                    fig.update_layout(
+                        # Match chart card inner spacing with the left "샘플 현황" chart.
+                        margin=dict(l=22, r=8, t=22, b=28),
+                        xaxis_title=None,
+                        yaxis_title=None,
+                    )
+                    fig.update_xaxes(
+                        tickmode="array" if tick_vals else None,
+                        tickvals=tick_vals,
+                        ticktext=tick_text,
+                        tickangle=0,
+                        title_text=None,
+                        range=x_range,
+                        showline=False,
+                        ticklabelposition="outside",
+                        ticklabelstandoff=0,
+                        automargin=True,
+                    )
+                    fig.update_yaxes(
+                        title_text=None,
+                        range=[-(y_lift or 0.2), y_top] if y_top is not None else None,
+                        zeroline=True,
+                        zerolinecolor="#111827",
+                        zerolinewidth=1.2,
+                        showgrid=True,
+                        gridcolor="#eef2f7",
+                        ticklabelposition="outside",
+                        ticklabelstandoff=0,
+                        ticks="",
+                        tickfont=dict(size=11, color="#111827"),
+                        automargin=False,
+                    )
+                    fig.update_traces(
+                        cliponaxis=False,
+                        textposition="top center",
+                    )
+
+                    # Show monthly average duration directly below the trend chart title.
+                    if pd_obj is not None and tick_vals:
+                        # Remove stale monthly-average annotations before re-adding.
+                        kept_anns = []
+                        for ann in list(getattr(fig.layout, "annotations", []) or []):
+                            ann_text = re.sub(r"<[^>]+>", "", str(getattr(ann, "text", "")))
+                            if "월별 평균 소요일" in ann_text:
+                                continue
+                            kept_anns.append(ann)
+                        fig.update_layout(annotations=kept_anns)
+
+                        avg_by_month = {}
+                        for ts_point, y_point in points:
+                            key = f"{ts_point.year:04d}-{ts_point.month:02d}"
+                            avg_by_month.setdefault(key, []).append(y_point)
+                        avg_lines = []
+                        for month_start in tick_vals:
+                            key = f"{month_start.year:04d}-{month_start.month:02d}"
+                            vals = avg_by_month.get(key, [])
+                            if vals:
+                                avg_value = sum(vals) / len(vals)
+                                avg_days = int(round(avg_value))
+                            else:
+                                avg_days = 0
+                            yy = str(month_start.year)[-2:]
+                            avg_lines.append(f"{yy}년{month_start.month:02d}월 : {avg_days}일")
+                        avg_inline = " / ".join(avg_lines)
+                        kwargs["title"] = "샘플 제작 소요일 추이"
+                        fig.add_annotation(
+                            xref="paper",
+                            yref="paper",
+                            x=0.0,
+                            y=1.03,
+                            xanchor="left",
+                            yanchor="bottom",
+                            showarrow=False,
+                            align="left",
+                            text=f"<b>월별 평균 소요일</b> {avg_inline}",
+                            font=dict(size=9, color="#334155"),
+                            bgcolor="rgba(0,0,0,0)",
+                            borderwidth=0,
+                        )
+                except Exception:
+                    pass
             return orig_render_chart_card(fig, *args, **kwargs)
+
+        def _render_duration_trend_chart_override(shipment_entries, *, width=760, card_width=None):
+            filtered_entries = list(shipment_entries or [])
+            pd_obj = getattr(compiled_app, "pd", None)
+            if filtered_entries and pd_obj is not None:
+                parsed_starts = []
+                for item in filtered_entries:
+                    ts = pd_obj.to_datetime(item.get("start"), errors="coerce")
+                    if not pd_obj.isna(ts):
+                        parsed_starts.append(ts)
+                if parsed_starts:
+                    max_start = max(parsed_starts)
+                    max_month_start = pd_obj.Timestamp(max_start.year, max_start.month, 1)
+                    min_start = max_month_start - pd_obj.DateOffset(months=2)
+                    max_end = max_month_start + pd_obj.offsets.MonthEnd(1)
+                    recent_only = []
+                    for item in filtered_entries:
+                        ts = pd_obj.to_datetime(item.get("start"), errors="coerce")
+                        if pd_obj.isna(ts):
+                            continue
+                        if min_start <= ts <= max_end:
+                            recent_only.append(item)
+                    if recent_only:
+                        filtered_entries = recent_only
+
+            adjusted_width = min(int(width), 500)
+            return orig_render_duration_trend_chart(
+                filtered_entries,
+                width=adjusted_width,
+                card_width=None,
+            )
 
         st_obj.columns = _columns_override
         if callable(orig_render_chart_card):
             compiled_app.render_chart_card = _render_chart_card_override
+        if callable(orig_render_duration_trend_chart):
+            compiled_app.render_duration_trend_chart = _render_duration_trend_chart_override
         try:
             return _orig_render_factory_detail_page(factory_name)
         finally:
             st_obj.columns = orig_columns
             if callable(orig_render_chart_card):
                 compiled_app.render_chart_card = orig_render_chart_card
+            if callable(orig_render_duration_trend_chart):
+                compiled_app.render_duration_trend_chart = orig_render_duration_trend_chart
 
     compiled_app.render_factory_detail_page = _render_factory_detail_page_with_fixed_stage_width
 
