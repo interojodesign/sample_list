@@ -173,10 +173,157 @@ if hasattr(compiled_app, "STAGE_COLORS"):
 if hasattr(compiled_app, "determine_stage"):
     _orig_determine_stage = compiled_app.determine_stage
 
-    def _determine_stage_renamed(*args, **kwargs):
-        return _normalize_stage_label(_orig_determine_stage(*args, **kwargs))
+    def _determine_stage_renamed(row, today, *args, **kwargs):
+        # Re-define overdue logic:
+        # - "납기 지연(발송일 변경)" date should not force delayed stage by itself.
+        # - Delayed means due date has passed and status is not completed.
+        # - Completed items must stay in "완료".
+        def _row_get(obj, key, default=None):
+            try:
+                return obj.get(key, default)
+            except Exception:
+                try:
+                    return obj[key]
+                except Exception:
+                    return default
+
+        parse_date_fn = getattr(compiled_app, "parse_date", None)
+        if not callable(parse_date_fn):
+            return _normalize_stage_label(_orig_determine_stage(row, today, *args, **kwargs))
+
+        raw = str(_row_get(row, "제작 현황", "") or "").strip()
+        lowered = raw.lower()
+
+        # Completion is always prioritized even if due date is in the past.
+        if ("완료" in raw) or ("complete" in lowered):
+            return _normalize_stage_label("완료")
+        completion_columns = (
+            "후공정 완료일",
+            "완료일",
+        )
+        for col in completion_columns:
+            completed_at = parse_date_fn(_row_get(row, col))
+            if completed_at is not None:
+                return _normalize_stage_label("완료")
+
+        due_date = None
+        due_columns = []
+        delay_col = getattr(compiled_app, "DELAY_DATE_COLUMN", None)
+        if isinstance(delay_col, str) and delay_col.strip():
+            due_columns.append(delay_col.strip())
+        due_columns.extend(list(getattr(compiled_app, "SHIPMENT_DATE_COLUMNS", []) or []))
+
+        seen = set()
+        for column in due_columns:
+            if not isinstance(column, str):
+                continue
+            col = column.strip()
+            if not col or col in seen:
+                continue
+            seen.add(col)
+            parsed = parse_date_fn(_row_get(row, col))
+            if parsed is not None:
+                due_date = parsed
+                break
+
+        if due_date is None:
+            if ("대기" in raw) or ("waiting" in lowered):
+                return _normalize_stage_label("대기")
+            if ("drop" in lowered) or ("보류" in raw):
+                return _normalize_stage_label("보류")
+            # Keep in-progress stage, then duplicate into "발송일 미확정" in dashboard preparation.
+            if "진행" in raw:
+                return _normalize_stage_label("진행중")
+            return _normalize_stage_label("납기예정일 미확정")
+
+        today_date = today.date() if hasattr(today, "date") else today
+        delta = (due_date - today_date).days
+
+        # Overdue + not completed = delayed.
+        if delta < 0:
+            return _normalize_stage_label("납기지연")
+
+        # Due within 3 days is always imminent (except completed handled above).
+        if delta <= 3:
+            return _normalize_stage_label("납기임박")
+
+        if ("대기" in raw) or ("waiting" in lowered):
+            return _normalize_stage_label("대기")
+        if ("drop" in lowered) or ("보류" in raw):
+            return _normalize_stage_label("보류")
+        if "진행" in raw:
+            return _normalize_stage_label("진행중")
+        return _normalize_stage_label("진행중")
 
     compiled_app.determine_stage = _determine_stage_renamed
+
+if hasattr(compiled_app, "prepare_dashboard_data") and hasattr(compiled_app, "pd"):
+    _orig_prepare_dashboard_data = compiled_app.prepare_dashboard_data
+
+    def _prepare_dashboard_data_with_missing_shipment_overlay(df, start_date, end_date):
+        result = _orig_prepare_dashboard_data(df, start_date, end_date)
+        try:
+            pd_obj = compiled_app.pd
+            if result is None or getattr(result, "empty", True):
+                return result
+            if "__stage__" not in getattr(result, "columns", []):
+                return result
+
+            parse_date_fn = getattr(compiled_app, "parse_date", None)
+            delay_col = getattr(compiled_app, "DELAY_DATE_COLUMN", None)
+            shipment_cols = list(getattr(compiled_app, "SHIPMENT_DATE_COLUMNS", []) or [])
+            candidate_cols = []
+            for col in [delay_col, *shipment_cols]:
+                if not isinstance(col, str):
+                    continue
+                name = col.strip()
+                if not name:
+                    continue
+                # "납기 요청일" is not a shipment-finalized date; exclude from missing-shipment check.
+                if "납기 요청" in name:
+                    continue
+                if name in result.columns and name not in candidate_cols:
+                    candidate_cols.append(name)
+            if not candidate_cols:
+                for col in result.columns:
+                    name = str(col).strip()
+                    if not name:
+                        continue
+                    if ("발송" in name or "배송" in name) and ("요청" not in name):
+                        candidate_cols.append(col)
+
+            if not candidate_cols:
+                return result
+
+            stage_series = result["__stage__"].astype(str).str.strip()
+            in_progress_mask = stage_series.eq("진행중")
+            if not bool(in_progress_mask.any()):
+                return result
+
+            missing_idx = []
+            progress_df = result.loc[in_progress_mask]
+            for idx, row in progress_df.iterrows():
+                has_shipment_date = False
+                for col in candidate_cols:
+                    value = row.get(col)
+                    parsed = parse_date_fn(value) if callable(parse_date_fn) else pd_obj.to_datetime(value, errors="coerce")
+                    if parsed is not None and not pd_obj.isna(parsed):
+                        has_shipment_date = True
+                        break
+                if not has_shipment_date:
+                    missing_idx.append(idx)
+
+            if not missing_idx:
+                return result
+
+            overlay = result.loc[missing_idx].copy()
+            overlay["__stage__"] = _NEW_MISSING_STAGE_LABEL
+            result = pd_obj.concat([result, overlay], ignore_index=True)
+        except Exception:
+            return result
+        return result
+
+    compiled_app.prepare_dashboard_data = _prepare_dashboard_data_with_missing_shipment_overlay
 
 if hasattr(compiled_app, "build_duration_entries") and hasattr(compiled_app, "pd"):
     _orig_build_duration_entries = compiled_app.build_duration_entries
@@ -596,11 +743,23 @@ if hasattr(compiled_app, "render_chart_card"):
                     # Keep a consistent baseline ratio across factories and the main chart.
                     line_lift = (max_stage_count * 0.05) if max_stage_count else 0.2
                     y_top = max(1.0, max_stage_count * 1.08)
+                    y_axis_kwargs = {}
+                    if is_detail_stage_chart:
+                        if total_count <= 5:
+                            y_top = max(5, max_stage_count)
+                            y_axis_kwargs = {"tick0": 0, "dtick": 1}
+                        elif total_count <= 10:
+                            y_top = max(10, ((max_stage_count + 1) // 2) * 2)
+                            y_axis_kwargs = {"tick0": 0, "dtick": 2}
+                        else:
+                            y_top = max(5, ((max_stage_count + 4) // 5) * 5)
+                            y_axis_kwargs = {"tick0": 0, "dtick": 5}
                     fig.update_yaxes(
                         range=[-line_lift, y_top],
                         zeroline=True,
                         zerolinecolor="#111827",
                         zerolinewidth=1.2,
+                        **y_axis_kwargs,
                     )
                     fig.update_xaxes(
                         showline=False,
@@ -807,7 +966,7 @@ if hasattr(compiled_app, "render_factory_detail_page"):
                     )
                     fig.update_yaxes(
                         title_text=None,
-                        range=[-(y_lift or 0.2), y_top] if y_top is not None else None,
+                        range=[0, y_top] if y_top is not None else None,
                         zeroline=True,
                         zerolinecolor="#111827",
                         zerolinewidth=1.2,
