@@ -248,6 +248,29 @@ div[class*="st-key-period_toolbar_"] [data-testid="stRadio"] label {
   box-shadow: var(--shadow-sm);
 }
 
+/* Factory detail pages (C/S/FRP): widen left stage chart while keeping trend/table visible. */
+.factory-chart-pair {
+  width: 100% !important;
+}
+
+.factory-chart-pair > div {
+  min-width: 0 !important;
+  width: 100% !important;
+  max-width: none !important;
+}
+
+.factory-chart-pair [data-testid="stElementContainer"],
+.factory-chart-pair [data-testid="stHorizontalBlock"],
+.factory-chart-pair iframe {
+  width: 100% !important;
+  max-width: none !important;
+}
+
+/* Match stage/trend chart card heights for C/S/FRP pages. */
+.factory-chart-pair > div:first-child iframe,
+.factory-chart-pair > div:last-child iframe {
+  height: 370px !important;
+}
 .chart-card-title {
   margin-bottom: 0.7rem;
   font-weight: 700;
@@ -382,6 +405,20 @@ button.factory-detail-btn:hover {
   padding-top: 0;
   /* Align right status cards with left chart card top (exclude period text row). */
   margin-top: 1.6rem;
+  position: relative;
+  padding-bottom: 1.35rem;
+}
+
+.status-panel-inline-hint {
+  position: absolute;
+  left: 0.15rem;
+  right: 0.15rem;
+  bottom: 0;
+  font-size: 0.86rem;
+  color: var(--text-muted);
+  line-height: 1.2;
+  text-align: right;
+  white-space: normal;
 }
 
 .st-key-status_panel,
@@ -957,6 +994,9 @@ td.empty {
 }
 
 @media (max-width: 1080px) {
+  .factory-chart-pair {
+    width: 100% !important;
+  }
   .limit-summary {
     grid-template-columns: 1fr;
   }
