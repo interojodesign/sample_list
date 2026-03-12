@@ -114,6 +114,135 @@ if hasattr(compiled_app, "init_state"):
 
     compiled_app.init_state = _init_state_prefer_xlsx
 
+# Keep selectbox options aligned with actual data values.
+_base_normalize_dia_value = getattr(compiled_app, "normalize_dia_value", None)
+
+
+def _clean_option_text(value) -> str:
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+    if text.lower() in {"", "nan", "none", "null", "nat", "<na>", "-"}:
+        return ""
+    return text
+
+
+def _normalize_dia_token(value) -> str:
+    text = _clean_option_text(value)
+    if not text:
+        return ""
+
+    if callable(_base_normalize_dia_value):
+        try:
+            text = _clean_option_text(_base_normalize_dia_value(text))
+        except Exception:
+            text = _clean_option_text(text)
+    if not text:
+        return ""
+
+    numeric_candidate = text.replace(",", "")
+    if re.fullmatch(r"\d+(?:\.\d+)?", numeric_candidate):
+        try:
+            parsed = float(numeric_candidate)
+            rendered = f"{parsed:.4f}".rstrip("0").rstrip(".")
+            if "." not in rendered:
+                rendered += ".0"
+            return rendered
+        except Exception:
+            return text
+    return text
+
+
+def _select_option_identity(column: str, value: str) -> str:
+    canonical_fn = getattr(compiled_app, "canonical_select_key", None)
+    if callable(canonical_fn):
+        try:
+            key = canonical_fn(column, value)
+            if key is not None:
+                return str(key)
+        except Exception:
+            pass
+    return re.sub(r"\s+", "", str(value)).lower()
+
+
+def _merge_select_options(column: str, base_options, dynamic_values) -> list[str]:
+    merged = [""]
+    seen = {""}
+    raw_values = list(base_options or []) + list(dynamic_values or [])
+    for raw in raw_values:
+        text = _clean_option_text(raw)
+        if not text:
+            continue
+        if column == "DIA":
+            text = _normalize_dia_token(text)
+            if not text:
+                continue
+        identity = _select_option_identity(column, text)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(text)
+    return merged
+
+
+def _build_dynamic_select_options(df):
+    original = getattr(compiled_app, "SELECT_COLUMN_OPTIONS", None)
+    if not isinstance(original, dict):
+        return original
+
+    updated = {}
+    for column, base_options in original.items():
+        extras = []
+        if column == "DIA":
+            extras.append("15.0")
+
+        if df is not None and hasattr(df, "columns") and column in getattr(df, "columns", []):
+            try:
+                extras.extend(getattr(df[column], "tolist", lambda: list(df[column]))())
+            except Exception:
+                pass
+
+        updated[column] = _merge_select_options(column, base_options, extras)
+    return updated
+
+
+def _run_with_dynamic_select_options(df, callback):
+    original = getattr(compiled_app, "SELECT_COLUMN_OPTIONS", None)
+    if not isinstance(original, dict):
+        return callback(df)
+    try:
+        compiled_app.SELECT_COLUMN_OPTIONS = _build_dynamic_select_options(df)
+        return callback(df)
+    finally:
+        compiled_app.SELECT_COLUMN_OPTIONS = original
+
+
+if callable(_base_normalize_dia_value):
+    def _normalize_dia_value_with_decimal(value):
+        return _normalize_dia_token(value)
+
+    compiled_app.normalize_dia_value = _normalize_dia_value_with_decimal
+
+if hasattr(compiled_app, "SELECT_COLUMN_OPTIONS"):
+    try:
+        compiled_app.SELECT_COLUMN_OPTIONS = _build_dynamic_select_options(None)
+    except Exception:
+        pass
+
+if hasattr(compiled_app, "build_column_config"):
+    _orig_build_column_config = compiled_app.build_column_config
+
+    def _build_column_config_with_dynamic_options(df):
+        return _run_with_dynamic_select_options(df, _orig_build_column_config)
+
+    compiled_app.build_column_config = _build_column_config_with_dynamic_options
+
+if hasattr(compiled_app, "build_excel_bytes"):
+    _orig_build_excel_bytes = compiled_app.build_excel_bytes
+
+    def _build_excel_bytes_with_dynamic_options(df):
+        return _run_with_dynamic_select_options(df, _orig_build_excel_bytes)
+
+    compiled_app.build_excel_bytes = _build_excel_bytes_with_dynamic_options
+
 # Open stage dialog only right after explicit "목록보기" click.
 if hasattr(compiled_app, "set_query_params"):
     _orig_set_query_params = compiled_app.set_query_params
