@@ -1318,28 +1318,39 @@ if hasattr(compiled_app, "render_factory_detail_page"):
 
 # Final safety net: strip duplicated "총 N건" labels from Plotly HTML payload.
 if hasattr(compiled_app, "components") and hasattr(compiled_app.components, "html"):
-    _orig_components_html = compiled_app.components.html
+    _components_api = compiled_app.components
+    _current_components_html = _components_api.html
+    _base_components_html = getattr(_current_components_html, "__sample_list_base_html__", None)
+    if not callable(_base_components_html):
+        _base_components_html = _current_components_html
 
-    def _components_html_without_total_duplicates(html_str, *args, **kwargs):
-        try:
-            if isinstance(html_str, str) and "plotly" in html_str:
-                marker = "Plotly.newPlot"
-                split_idx = html_str.find(marker)
-                if split_idx >= 0:
-                    prefix = html_str[:split_idx]
-                    script_part = html_str[split_idx:]
-                    # Strip any in-plot total text while keeping title area text outside plot payload.
-                    script_part = re.sub(r"총\\s*\\d+\\s*건\\s*<br>\\s*", "", script_part)
-                    script_part = re.sub(r"총\\s*\\d+\\s*건\\\\n", "", script_part)
-                    script_part = re.sub(r"총\\s*\\d+\\s*건", "", script_part)
-                    html_str = prefix + script_part
-                else:
-                    html_str = re.sub(r"총\\s*\\d+\\s*건", "", html_str)
-        except Exception:
-            pass
-        return _orig_components_html(html_str, *args, **kwargs)
+    if callable(_base_components_html):
+        def _components_html_without_total_duplicates(
+            html_str,
+            *args,
+            _base_html=_base_components_html,
+            **kwargs,
+        ):
+            try:
+                if isinstance(html_str, str) and "plotly" in html_str:
+                    marker = "Plotly.newPlot"
+                    split_idx = html_str.find(marker)
+                    if split_idx >= 0:
+                        prefix = html_str[:split_idx]
+                        script_part = html_str[split_idx:]
+                        # Strip any in-plot total text while keeping title area text outside plot payload.
+                        script_part = re.sub(r"총\\s*\\d+\\s*건\\s*<br>\\s*", "", script_part)
+                        script_part = re.sub(r"총\\s*\\d+\\s*건\\\\n", "", script_part)
+                        script_part = re.sub(r"총\\s*\\d+\\s*건", "", script_part)
+                        html_str = prefix + script_part
+                    else:
+                        html_str = re.sub(r"총\\s*\\d+\\s*건", "", html_str)
+            except Exception:
+                pass
+            return _base_html(html_str, *args, **kwargs)
 
-    compiled_app.components.html = _components_html_without_total_duplicates
+        _components_html_without_total_duplicates.__sample_list_base_html__ = _base_components_html
+        _components_api.html = _components_html_without_total_duplicates
 
 
 def _inject_runtime_dom_tweaks() -> None:
