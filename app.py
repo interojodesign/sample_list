@@ -365,8 +365,9 @@ if hasattr(compiled_app, "determine_stage"):
                 return _normalize_stage_label("진행중")
             return _normalize_stage_label("납기예정일 미확정")
 
-        today_date = today.date() if hasattr(today, "date") else today
-        delta = (due_date - today_date).days
+        due_date_only = due_date.date() if hasattr(due_date, "date") else due_date
+        today_date_only = today.date() if hasattr(today, "date") else today
+        delta = (due_date_only - today_date_only).days
 
         # Overdue + not completed = delayed.
         if delta < 0:
