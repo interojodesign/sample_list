@@ -27,6 +27,8 @@ document.addEventListener("DOMContentLoaded", () => {
     "후공정 완성일",
     "납기 요청일",
     "배송/예정일",
+    "제작 현황",
+    "샘플제작 공장위치",
   ];
 
   const defaultRow = {
@@ -47,6 +49,8 @@ document.addEventListener("DOMContentLoaded", () => {
     "후공정 완성일": "25.10.09",
     "납기 요청일": "25.10.09",
     "배송/예정일": "25.10.10",
+    "제작 현황": "대기",
+    "샘플제작 공장위치": "미지정",
   };
 
   const refs = {
