@@ -1320,9 +1320,38 @@ if hasattr(compiled_app, "render_factory_detail_page"):
 if hasattr(compiled_app, "components") and hasattr(compiled_app.components, "html"):
     _components_api = compiled_app.components
     _current_components_html = _components_api.html
-    _base_components_html = getattr(_current_components_html, "__sample_list_base_html__", None)
-    if not callable(_base_components_html):
-        _base_components_html = _current_components_html
+
+    def _resolve_base_components_html(func):
+        current = func
+        visited = set()
+        while callable(current):
+            current_id = id(current)
+            if current_id in visited:
+                break
+            visited.add(current_id)
+
+            next_func = getattr(current, "__sample_list_base_html__", None)
+            if callable(next_func) and next_func is not current:
+                current = next_func
+                continue
+
+            # Legacy unwrapping: older wrapper versions chained through a module-global
+            # `_orig_components_html`, which could stack deeply across reruns.
+            legacy_next = None
+            try:
+                globals_dict = getattr(current, "__globals__", None)
+                if isinstance(globals_dict, dict):
+                    legacy_next = globals_dict.get("_orig_components_html")
+            except Exception:
+                legacy_next = None
+            if callable(legacy_next) and legacy_next is not current:
+                current = legacy_next
+                continue
+
+            break
+        return current if callable(current) else None
+
+    _base_components_html = _resolve_base_components_html(_current_components_html)
 
     if callable(_base_components_html):
         def _components_html_without_total_duplicates(
