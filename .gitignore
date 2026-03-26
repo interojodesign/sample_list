@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 !app_compiled.pyc
 .venv/
+.vscode/
 sample-list.csv
 !sample-list.xlsx
 .last-used-file
