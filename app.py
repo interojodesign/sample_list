@@ -114,6 +114,43 @@ if hasattr(compiled_app, "init_state"):
 
     compiled_app.init_state = _init_state_prefer_xlsx
 
+# Pandas compatibility:
+# - pandas < 3: DataFrame.applymap exists (deprecated)
+# - pandas >= 3: DataFrame.applymap removed; use DataFrame.map
+if hasattr(compiled_app, "sanitize_dataframe"):
+    def _sanitize_dataframe_with_map_compat(df):
+        pd_obj = compiled_app.pd
+        if df.empty:
+            return pd_obj.DataFrame(columns=list(compiled_app.DEFAULT_ROW.keys()))
+
+        df = df.loc[:, ~df.columns.astype(str).str.contains("^Unnamed")]
+        df = df.reset_index(drop=True)
+        df = df.replace({pd_obj.NA: "", None: ""})
+        df = df.fillna("")
+
+        def _normalize_text(value):
+            token = str(value).strip().lower()
+            if token in {"none", "nan", "null", "-"}:
+                return ""
+            return str(value)
+
+        text_df = df.astype(str)
+        map_fn = getattr(text_df, "map", None)
+        if callable(map_fn):
+            df = map_fn(_normalize_text)
+        else:
+            df = text_df.applymap(_normalize_text)
+
+        df = compiled_app.normalize_special_columns(df)
+        df = compiled_app.normalize_select_columns(df)
+        df = compiled_app.ensure_location_column(df)
+        df[compiled_app.LOCATION_COLUMN] = df[compiled_app.LOCATION_COLUMN].apply(
+            compiled_app.normalize_location_value
+        )
+        return df
+
+    compiled_app.sanitize_dataframe = _sanitize_dataframe_with_map_compat
+
 # Keep selectbox options aligned with actual data values.
 _base_normalize_dia_value = getattr(compiled_app, "normalize_dia_value", None)
 
