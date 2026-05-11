@@ -372,6 +372,10 @@ if hasattr(compiled_app, "determine_stage"):
             if completed_at is not None:
                 return _normalize_stage_label("완료")
 
+        # Hold/drop should always stay in "보류", regardless of due-date state.
+        if ("drop" in lowered) or ("보류" in raw):
+            return _normalize_stage_label("보류")
+
         due_date = None
         due_columns = []
         delay_col = getattr(compiled_app, "DELAY_DATE_COLUMN", None)
