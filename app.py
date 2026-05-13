@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import calendar
 from datetime import date, datetime, timedelta
+import hashlib
 from importlib.machinery import SourcelessFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
@@ -1067,6 +1068,70 @@ if hasattr(compiled_app, "render_chart_card"):
 if hasattr(compiled_app, "render_sample_dashboard"):
     _orig_render_sample_dashboard = compiled_app.render_sample_dashboard
 
+    def _render_sample_upload_box() -> None:
+        st_obj = compiled_app.st
+        upload_sig_key = "_sample_dashboard_applied_upload_sig"
+
+        with st_obj.expander("샘플 리스트 엑셀 업로드", expanded=False):
+            uploaded = st_obj.file_uploader(
+                "sample-list.xlsx 파일 선택",
+                type=["xlsx"],
+                key="sample_dashboard_upload_file",
+                help="업로드 즉시 대시보드 데이터에 반영됩니다.",
+            )
+
+            current_file = st_obj.session_state.get("current_file")
+            current_name = Path(str(current_file)).name if current_file else "sample-list.xlsx"
+            st_obj.caption(f"현재 반영 파일: `{current_name}`")
+
+            if uploaded is None:
+                return
+
+            raw_bytes = uploaded.getvalue()
+            file_sig = f"{uploaded.name}:{uploaded.size}:{hashlib.sha256(raw_bytes).hexdigest()}"
+            if st_obj.session_state.get(upload_sig_key) == file_sig:
+                st_obj.info("이미 반영된 동일 파일입니다.")
+                return
+
+            try:
+                uploaded_df = compiled_app.read_uploaded_file(uploaded)
+                sanitized_df = compiled_app.sanitize_dataframe(uploaded_df)
+            except Exception as exc:
+                st_obj.error("엑셀 파일을 읽을 수 없습니다. sample-list 형식(.xlsx)인지 확인해 주세요.")
+                st_obj.caption(str(exc))
+                return
+
+            target_path = ROOT_DIR / "sample-list.xlsx"
+            try:
+                target_path.write_bytes(raw_bytes)
+            except Exception as exc:
+                st_obj.error("업로드 파일 저장에 실패했습니다.")
+                st_obj.caption(str(exc))
+                return
+
+            st_obj.session_state["df"] = sanitized_df
+            st_obj.session_state["current_file"] = str(target_path)
+            st_obj.session_state["status"] = f"{uploaded.name} 업로드 반영 완료"
+            st_obj.session_state["last_uploaded_sig"] = file_sig
+            st_obj.session_state[upload_sig_key] = file_sig
+
+            remember_last_file = getattr(compiled_app, "remember_last_file", None)
+            if callable(remember_last_file):
+                try:
+                    remember_last_file(target_path)
+                except Exception:
+                    pass
+
+            reset_history = getattr(compiled_app, "reset_history", None)
+            if callable(reset_history):
+                try:
+                    reset_history()
+                except Exception:
+                    pass
+
+            st_obj.success("업로드 반영이 완료되었습니다. 화면을 새로고칩니다.")
+            st_obj.rerun()
+
     def _render_sample_dashboard_with_hint_relocated():
         st_obj = compiled_app.st
         original_caption = st_obj.caption
@@ -1084,8 +1149,13 @@ if hasattr(compiled_app, "render_sample_dashboard"):
         finally:
             st_obj.caption = original_caption
 
+        left_col, right_col = st_obj.columns([1.35, 0.95])
+        with left_col:
+            upload_panel = st_obj.container(key="sample_upload_panel")
+            with upload_panel:
+                _render_sample_upload_box()
+
         if suppressed_hint["value"]:
-            _, right_col = st_obj.columns([1.35, 0.95])
             with right_col:
                 st_obj.markdown(
                     (
@@ -1450,6 +1520,75 @@ def _ensure_default_route_to_sample_dashboard() -> None:
     except Exception:
         pass
 
+
+def _hide_admin_page_in_sidebar() -> None:
+    try:
+        sidebar_obj = compiled_app.st.sidebar
+        current_radio = getattr(sidebar_obj, "radio", None)
+        if not callable(current_radio):
+            return
+
+        base_radio = getattr(current_radio, "__sample_list_base_radio__", None)
+        orig_radio = base_radio if callable(base_radio) else current_radio
+
+        def _radio_without_admin(label, options, *args, _base_radio=orig_radio, **kwargs):
+            key = kwargs.get("key")
+            if key == "sidebar_nav_selection":
+                try:
+                    option_list = list(options)
+                    format_func = kwargs.get("format_func")
+                    filtered = []
+                    for opt in option_list:
+                        label_text = ""
+                        if callable(format_func):
+                            try:
+                                label_text = str(format_func(opt)).strip()
+                            except Exception:
+                                label_text = ""
+                        if label_text == "관리 페이지":
+                            continue
+                        filtered.append(opt)
+
+                    if filtered and len(filtered) < len(option_list):
+                        state = compiled_app.st.session_state
+                        if state.get(key) not in filtered:
+                            state[key] = filtered[0]
+                        options = filtered
+                except Exception:
+                    pass
+            return _base_radio(label, options, *args, **kwargs)
+
+        _radio_without_admin.__sample_list_base_radio__ = orig_radio
+        sidebar_obj.radio = _radio_without_admin
+    except Exception:
+        pass
+
+
+def _disable_admin_page_render() -> None:
+    current_render_admin = getattr(compiled_app, "render_admin_page", None)
+    if not callable(current_render_admin):
+        return
+
+    base_render_admin = getattr(current_render_admin, "__sample_list_base_admin__", None)
+    orig_render_admin = base_render_admin if callable(base_render_admin) else current_render_admin
+
+    def _render_admin_page_disabled(_base_admin=orig_render_admin):
+        st_obj = compiled_app.st
+        st_obj.info("관리 페이지는 비활성화되었습니다. 왼쪽 하단의 엑셀 업로드로 데이터를 반영해 주세요.")
+        try:
+            if hasattr(compiled_app, "set_query_params"):
+                compiled_app.set_query_params(view="sample", stage_idx=None)
+        except Exception:
+            pass
+        render_sample_dashboard = getattr(compiled_app, "render_sample_dashboard", None)
+        if callable(render_sample_dashboard):
+            return render_sample_dashboard()
+        return _base_admin()
+
+    _render_admin_page_disabled.__sample_list_base_admin__ = orig_render_admin
+    compiled_app.render_admin_page = _render_admin_page_disabled
+
+
 if hasattr(compiled_app, "main"):
     try:
         allow_once = bool(compiled_app.st.session_state.pop("_stage_dialog_open_once", False))
@@ -1462,6 +1601,8 @@ if hasattr(compiled_app, "main"):
                 compiled_app.st.query_params[key] = value
     except Exception:
         pass
+    _hide_admin_page_in_sidebar()
+    _disable_admin_page_render()
     _ensure_default_route_to_sample_dashboard()
     compiled_app.main()
     _inject_runtime_dom_tweaks()

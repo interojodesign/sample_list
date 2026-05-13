@@ -609,7 +609,7 @@ button.factory-detail-btn:hover {
 }
 
 div[class*="st-key-factory_detail_native_"] {
-  margin-top: 0.15rem;
+  margin-top: 0.95rem;
 }
 
 div[class*="st-key-stage_popup_native_"] {
@@ -620,6 +620,28 @@ div[class*="st-key-stage_popup_native_"] {
   justify-content: center !important;
   width: 100%;
   height: 100%;
+}
+
+/* Sample dashboard upload panel spacing tune:
+   - increase gap above factory detail buttons
+   - pull upload expander upward to align with right-side guide end */
+.st-key-sample_upload_panel {
+  margin-top: -5.05rem;
+  position: relative;
+  z-index: 1;
+}
+
+.st-key-sample_upload_panel [data-testid="stVerticalBlock"] {
+  gap: 0 !important;
+}
+
+.st-key-sample_upload_panel [data-testid="stElementContainer"] {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.st-key-sample_upload_panel [data-testid="stExpander"] {
+  margin-top: 0 !important;
 }
 
 .st-key-status_panel [data-testid="stHorizontalBlock"] > div:last-child [data-testid="stButton"] {
@@ -1059,6 +1081,10 @@ td.empty {
     height: 0 !important;
     margin: 0 !important;
     padding: 0 !important;
+  }
+
+  .st-key-sample_upload_panel {
+    margin-top: 0;
   }
 
 }
