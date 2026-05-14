@@ -115,6 +115,111 @@ if hasattr(compiled_app, "init_state"):
 
     compiled_app.init_state = _init_state_prefer_xlsx
 
+
+_REMOVED_PROCESS_COLUMNS = {
+    "인쇄 완료일",
+    "후공정 완료일",
+    "후공정 완성일",
+    "납기 요청일",
+}
+_RESTORED_OPTIONAL_COLUMNS = ("인쇄 시작일",)
+
+
+def _drop_removed_process_columns(df):
+    if df is None or not hasattr(df, "columns"):
+        return df
+
+
+def _ensure_columns_present(df, columns):
+    if df is None or not hasattr(df, "columns"):
+        return df
+    try:
+        for col in columns:
+            if col not in df.columns:
+                df[col] = ""
+    except Exception:
+        return df
+    return df
+    try:
+        to_drop = [
+            col
+            for col in list(getattr(df, "columns", []))
+            if str(col).strip() in _REMOVED_PROCESS_COLUMNS
+        ]
+        if not to_drop:
+            return df
+        return df.drop(columns=to_drop, errors="ignore")
+    except Exception:
+        return df
+
+
+def _strip_removed_process_columns_from_defaults() -> None:
+    default_row = getattr(compiled_app, "DEFAULT_ROW", None)
+    if isinstance(default_row, dict):
+        for key in list(default_row.keys()):
+            if str(key).strip() in _REMOVED_PROCESS_COLUMNS:
+                default_row.pop(key, None)
+
+    shipment_cols = getattr(compiled_app, "SHIPMENT_DATE_COLUMNS", None)
+    if isinstance(shipment_cols, (list, tuple)):
+        cleaned = [
+            col
+            for col in list(shipment_cols)
+            if str(col).strip() not in _REMOVED_PROCESS_COLUMNS
+        ]
+        if isinstance(shipment_cols, tuple):
+            compiled_app.SHIPMENT_DATE_COLUMNS = tuple(cleaned)
+        else:
+            compiled_app.SHIPMENT_DATE_COLUMNS = cleaned
+
+
+_strip_removed_process_columns_from_defaults()
+
+
+def _parse_round_value(value) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = re.search(r"-?\d+", text)
+    if not match:
+        return None
+    try:
+        return int(match.group(0))
+    except Exception:
+        return None
+
+
+def _clean_limit_popup_table(df):
+    df = _drop_removed_process_columns(df)
+    if df is None or not hasattr(df, "columns"):
+        return df
+    try:
+        internal_cols = [
+            col for col in list(df.columns)
+            if str(col).strip().startswith("__")
+        ]
+        if internal_cols:
+            df = df.drop(columns=internal_cols, errors="ignore")
+    except Exception:
+        return df
+    return df
+
+if hasattr(compiled_app, "load_local_file"):
+    _orig_load_local_file = compiled_app.load_local_file
+
+    def _load_local_file_without_removed_columns(path):
+        return _drop_removed_process_columns(_orig_load_local_file(path))
+
+    compiled_app.load_local_file = _load_local_file_without_removed_columns
+
+if hasattr(compiled_app, "read_uploaded_file"):
+    _orig_read_uploaded_file = compiled_app.read_uploaded_file
+
+    def _read_uploaded_file_without_removed_columns(uploaded_file):
+        return _drop_removed_process_columns(_orig_read_uploaded_file(uploaded_file))
+
+    compiled_app.read_uploaded_file = _read_uploaded_file_without_removed_columns
+
 # Pandas compatibility:
 # - pandas < 3: DataFrame.applymap exists (deprecated)
 # - pandas >= 3: DataFrame.applymap removed; use DataFrame.map
@@ -122,9 +227,18 @@ if hasattr(compiled_app, "sanitize_dataframe"):
     def _sanitize_dataframe_with_map_compat(df):
         pd_obj = compiled_app.pd
         if df.empty:
-            return pd_obj.DataFrame(columns=list(compiled_app.DEFAULT_ROW.keys()))
+            base_columns = [
+                col
+                for col in list(compiled_app.DEFAULT_ROW.keys())
+                if str(col).strip() not in _REMOVED_PROCESS_COLUMNS
+            ]
+            for col in _RESTORED_OPTIONAL_COLUMNS:
+                if col not in base_columns:
+                    base_columns.append(col)
+            return pd_obj.DataFrame(columns=base_columns)
 
         df = df.loc[:, ~df.columns.astype(str).str.contains("^Unnamed")]
+        df = _drop_removed_process_columns(df)
         df = df.reset_index(drop=True)
         df = df.replace({pd_obj.NA: "", None: ""})
         df = df.fillna("")
@@ -148,7 +262,8 @@ if hasattr(compiled_app, "sanitize_dataframe"):
         df[compiled_app.LOCATION_COLUMN] = df[compiled_app.LOCATION_COLUMN].apply(
             compiled_app.normalize_location_value
         )
-        return df
+        df = _ensure_columns_present(df, _RESTORED_OPTIONAL_COLUMNS)
+        return _drop_removed_process_columns(df)
 
     compiled_app.sanitize_dataframe = _sanitize_dataframe_with_map_compat
 
@@ -269,7 +384,13 @@ if hasattr(compiled_app, "build_column_config"):
     _orig_build_column_config = compiled_app.build_column_config
 
     def _build_column_config_with_dynamic_options(df):
-        return _run_with_dynamic_select_options(df, _orig_build_column_config)
+        sanitized_df = _drop_removed_process_columns(df)
+        config = _run_with_dynamic_select_options(sanitized_df, _orig_build_column_config)
+        if isinstance(config, dict):
+            for col in list(config.keys()):
+                if str(col).strip() in _REMOVED_PROCESS_COLUMNS:
+                    config.pop(col, None)
+        return config
 
     compiled_app.build_column_config = _build_column_config_with_dynamic_options
 
@@ -606,6 +727,381 @@ if hasattr(compiled_app, "prepare_limit_dashboard_data") and hasattr(compiled_ap
             return result
 
     compiled_app.prepare_limit_dashboard_data = _prepare_limit_dashboard_data_with_confirm_override
+
+if hasattr(compiled_app, "render_limit_dashboard") and hasattr(compiled_app, "prepare_limit_dashboard_data"):
+    _orig_render_limit_dashboard = compiled_app.render_limit_dashboard
+
+    def _render_limit_dashboard_custom():
+        st_obj = compiled_app.st
+        pd_obj = getattr(compiled_app, "pd", None)
+        parse_date_fn = getattr(compiled_app, "parse_date", None)
+        set_query_params = getattr(compiled_app, "set_query_params", None)
+        render_period_selector = getattr(compiled_app, "render_period_selector", None)
+        prepare_limit_dashboard_data = getattr(compiled_app, "prepare_limit_dashboard_data", None)
+
+        if not callable(render_period_selector) or not callable(prepare_limit_dashboard_data):
+            return _orig_render_limit_dashboard()
+
+        if callable(set_query_params):
+            set_query_params(view="limit")
+
+        st_obj.markdown(
+            """
+            <div class="page-hero">
+                <div class="page-hero-title">한도 제작 현황</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        today = datetime.now()
+        st_obj.markdown(
+            f"<p class='page-caption'>{today:%Y년 %m월 %d일 %H:%M 기준}</p>",
+            unsafe_allow_html=True,
+        )
+
+        _, preset_start, preset_end = render_period_selector(today, "limit")
+
+        try:
+            (
+                eligible_confirmed,
+                eligible_ready,
+                eligible_pending,
+                confirmed_df,
+                ready_df,
+                pending_df,
+            ) = prepare_limit_dashboard_data(
+                st_obj.session_state.df,
+                preset_start,
+                preset_end,
+            )
+        except Exception:
+            return _orig_render_limit_dashboard()
+
+        st_obj.markdown(
+            (
+                "<p class='page-caption'>"
+                f"{preset_start:%Y년 %m월 %d일} ~ {preset_end:%Y년 %m월 %d일} "
+                "한도 제작 기준: 차수 4차 이상 또는 렌즈 컨펌일 등록"
+                "</p>"
+            ),
+            unsafe_allow_html=True,
+        )
+
+        if (
+            getattr(confirmed_df, "empty", True)
+            and getattr(ready_df, "empty", True)
+            and getattr(pending_df, "empty", True)
+        ):
+            st_obj.info("선택한 기간에 관리할 한도 정보가 없습니다.")
+            return
+
+        def _to_datetime_value(value):
+            if value is None:
+                return None
+            if isinstance(value, datetime):
+                return value
+            if isinstance(value, date):
+                return datetime.combine(value, datetime.min.time())
+            try:
+                if pd_obj is not None:
+                    parsed = pd_obj.to_datetime(value, errors="coerce")
+                    if not pd_obj.isna(parsed):
+                        return parsed.to_pydatetime() if hasattr(parsed, "to_pydatetime") else parsed
+            except Exception:
+                return None
+            return None
+
+        def _parse_date_value(value):
+            if callable(parse_date_fn):
+                try:
+                    parsed = parse_date_fn(value)
+                    if parsed is not None:
+                        return _to_datetime_value(parsed)
+                except Exception:
+                    pass
+            return _to_datetime_value(value)
+
+        def _merge_unique_frames(*frames):
+            valid_frames = [
+                frame
+                for frame in frames
+                if frame is not None and hasattr(frame, "index") and hasattr(frame, "columns")
+            ]
+            if not valid_frames:
+                return pd_obj.DataFrame() if pd_obj is not None else None
+            if pd_obj is None:
+                return valid_frames[0]
+            merged = pd_obj.concat(valid_frames, axis=0)
+            return merged.loc[~merged.index.duplicated(keep="first")].copy()
+
+        def _augment_pending_by_round_rules(base_df, pending_frame, ready_frame, confirmed_frame, eligible_pending_frame):
+            if pd_obj is None:
+                return pending_frame, eligible_pending_frame
+            if base_df is None or getattr(base_df, "empty", True):
+                return pending_frame, eligible_pending_frame
+
+            start_bound = _to_datetime_value(preset_start)
+            end_bound = _to_datetime_value(preset_end)
+            if start_bound is None or end_bound is None:
+                return pending_frame, eligible_pending_frame
+
+            local = _drop_removed_process_columns(base_df.copy())
+            if local is None or getattr(local, "empty", True):
+                return pending_frame, eligible_pending_frame
+
+            filter_columns = []
+            filter_date_col = getattr(compiled_app, "FILTER_DATE_COLUMN", None)
+            if isinstance(filter_date_col, str) and filter_date_col.strip() and filter_date_col in local.columns:
+                filter_columns.append(filter_date_col.strip())
+
+            for col in list(getattr(compiled_app, "SHIPMENT_DATE_COLUMNS", []) or []):
+                if not isinstance(col, str):
+                    continue
+                name = col.strip()
+                if name and name in local.columns and name not in filter_columns:
+                    filter_columns.append(name)
+
+            for fallback in ("발송 예정일", "배송/예정일", "발송예정일"):
+                if fallback in local.columns and fallback not in filter_columns:
+                    filter_columns.append(fallback)
+
+            confirm_columns = []
+            for col in (
+                getattr(compiled_app, "LIMIT_CONFIRM_COLUMN", None),
+                getattr(compiled_app, "LENS_CONFIRM_COLUMN", None),
+                "한도 컨펌일",
+                "렌즈 컨펌일",
+                "시안 컨펌일",
+            ):
+                if not isinstance(col, str):
+                    continue
+                name = col.strip()
+                if name and name in local.columns and name not in confirm_columns:
+                    confirm_columns.append(name)
+
+            exclude_idx = set()
+            for frame in (pending_frame, ready_frame, confirmed_frame):
+                if frame is not None and hasattr(frame, "index"):
+                    exclude_idx.update(list(frame.index))
+
+            extra_indices = []
+            for idx, row in local.iterrows():
+                if idx in exclude_idx:
+                    continue
+
+                round_value = _parse_round_value(row.get("차수"))
+                if round_value is None:
+                    continue
+
+                lens_confirm_value = _parse_date_value(
+                    row.get(getattr(compiled_app, "LENS_CONFIRM_COLUMN", "렌즈 컨펌일"))
+                ) or _parse_date_value(row.get("렌즈 컨펌일"))
+                include_by_rule = (round_value >= 4) or (lens_confirm_value is not None)
+                if not include_by_rule:
+                    continue
+
+                in_selected_period = False
+                for col in filter_columns:
+                    parsed_date = _parse_date_value(row.get(col))
+                    if parsed_date is None:
+                        continue
+                    if start_bound <= parsed_date <= end_bound:
+                        in_selected_period = True
+                        break
+
+                if not in_selected_period:
+                    continue
+
+                extra_indices.append(idx)
+
+            if not extra_indices:
+                return pending_frame, eligible_pending_frame
+
+            extras = local.loc[extra_indices].copy()
+            pending_merged = _merge_unique_frames(pending_frame, extras)
+            eligible_pending_merged = _merge_unique_frames(eligible_pending_frame, extras)
+            return pending_merged, eligible_pending_merged
+
+        source_df = getattr(st_obj.session_state, "df", None)
+        pending_df_aug, eligible_pending_aug = _augment_pending_by_round_rules(
+            source_df,
+            pending_df,
+            ready_df,
+            confirmed_df,
+            eligible_pending,
+        )
+
+        def _filter_pending_needed(frame, lens_confirm_columns):
+            if frame is None or getattr(frame, "empty", True):
+                return frame
+            local = frame.copy()
+            try:
+                confirm_cols = [
+                    col for col in list(lens_confirm_columns or [])
+                    if isinstance(col, str) and col.strip()
+                ]
+                mask = local.apply(
+                    lambda row: (
+                        ((_parse_round_value(row.get("차수")) or -10**9) >= 4)
+                        or any(
+                            _parse_date_value(row.get(col)) is not None
+                            for col in confirm_cols
+                            if col in row.index
+                        )
+                    ),
+                    axis=1,
+                )
+                return local.loc[mask].copy()
+            except Exception:
+                return local
+
+        def _filter_by_required_date(frame, date_columns):
+            if frame is None or getattr(frame, "empty", True):
+                return frame
+            cols = [col for col in list(date_columns or []) if isinstance(col, str) and col.strip()]
+            if not cols:
+                return frame
+            local = frame.copy()
+            try:
+                mask = local.apply(
+                    lambda row: any(_parse_date_value(row.get(col)) is not None for col in cols if col in row.index),
+                    axis=1,
+                )
+                return local.loc[mask].copy()
+            except Exception:
+                return local
+
+        confirmed_count = len(eligible_confirmed)
+        eligible_ready_only = eligible_ready.drop(index=eligible_confirmed.index, errors="ignore")
+        ready_only = ready_df.drop(index=confirmed_df.index, errors="ignore")
+
+        lens_confirm_col = getattr(compiled_app, "LENS_CONFIRM_COLUMN", "렌즈 컨펌일")
+        ready_date_columns = [lens_confirm_col, "렌즈 컨펌일"]
+        eligible_ready_only = _filter_by_required_date(eligible_ready_only, ready_date_columns)
+        ready_only = _filter_by_required_date(ready_only, ready_date_columns)
+        ready_count = len(eligible_ready_only) if eligible_ready_only is not None else 0
+
+        pending_df_aug = _filter_pending_needed(pending_df_aug, ready_date_columns)
+        eligible_pending_aug = _filter_pending_needed(eligible_pending_aug, ready_date_columns)
+        pending_count = len(eligible_pending_aug) if eligible_pending_aug is not None else 0
+
+        metrics_html = (
+            "<div class=\"limit-summary\">"
+            f"<div class=\"limit-metric\"><h4>렌즈(STD) 컨펌 완료</h4><strong>{confirmed_count}</strong>"
+            "<span style=\"margin-left:0.3rem;\">건</span></div>"
+            f"<div class=\"limit-metric\"><h4>한도 바로 발송 가능</h4><strong>{ready_count}</strong>"
+            "<span style=\"margin-left:0.3rem;\">건</span></div>"
+            f"<div class=\"limit-metric\"><h4>한도 제작 필요</h4><strong>{pending_count}</strong>"
+            "<span style=\"margin-left:0.3rem;\">건</span></div>"
+            "</div>"
+        )
+        st_obj.markdown(metrics_html, unsafe_allow_html=True)
+
+        def _has_any_date_value(row, columns) -> bool:
+            for col in columns:
+                if col in row.index and _parse_date_value(row.get(col)) is not None:
+                    return True
+            return False
+
+        def _to_display_table(frame, columns_map, required_date_columns=None):
+            if pd_obj is None:
+                return frame
+            required_date_columns = list(required_date_columns or [])
+            column_names = [dst for _, dst in columns_map]
+
+            if frame is None or getattr(frame, "empty", True):
+                return pd_obj.DataFrame(columns=column_names)
+
+            local = _clean_limit_popup_table(frame.copy())
+            if local is None or getattr(local, "empty", True):
+                return pd_obj.DataFrame(columns=column_names)
+
+            if required_date_columns:
+                mask = local.apply(
+                    lambda row: _has_any_date_value(row, required_date_columns),
+                    axis=1,
+                )
+                local = local.loc[mask].copy()
+                if local.empty:
+                    return pd_obj.DataFrame(columns=column_names)
+
+            out = pd_obj.DataFrame(index=local.index)
+            for src, dst in columns_map:
+                out[dst] = local[src] if src in local.columns else ""
+
+            date_like_columns = {"렌즈 컨펌일", "한도 컨펌일"}
+            for col in [c for c in out.columns if c in date_like_columns]:
+                out[col] = out[col].apply(
+                    lambda value: (
+                        _parse_date_value(value).strftime("%Y-%m-%d")
+                        if _parse_date_value(value) is not None
+                        else (
+                            ""
+                            if str(value).strip().lower() in {"", "nan", "none", "nat", "<na>"}
+                            else str(value).strip()
+                        )
+                    )
+                )
+
+            out = out.fillna("")
+            return out.reset_index(drop=True)
+
+        confirmed_columns_map = [
+            ("국가", "국가"),
+            ("고객사", "고객사"),
+            ("품명", "품명"),
+            ("샘플 구분", "샘플구분"),
+            ("차수", "차수"),
+            ("렌즈 컨펌일", "렌즈 컨펌일"),
+            ("한도 컨펌일", "한도 컨펌일"),
+        ]
+        ready_pending_columns_map = [
+            ("국가", "국가"),
+            ("고객사", "고객사"),
+            ("품명", "품명"),
+            ("샘플 구분", "샘플구분"),
+            ("차수", "차수"),
+            ("렌즈 컨펌일", "렌즈 컨펌일"),
+            ("한도 제작", "한도제작"),
+        ]
+
+        limit_confirm_col = getattr(compiled_app, "LIMIT_CONFIRM_COLUMN", "한도 컨펌일")
+
+        confirmed_table = _to_display_table(
+            confirmed_df,
+            confirmed_columns_map,
+            required_date_columns=[limit_confirm_col, "한도 컨펌일"],
+        )
+        ready_table = _to_display_table(
+            ready_only,
+            ready_pending_columns_map,
+            required_date_columns=[lens_confirm_col, "렌즈 컨펌일"],
+        )
+        pending_table = _to_display_table(
+            pending_df_aug,
+            ready_pending_columns_map,
+        )
+
+        st_obj.subheader("한도 컨펌 완료(시양산 대상)")
+        if confirmed_table.empty:
+            st_obj.info("한도 컨펌일이 등록된 항목이 없습니다.")
+        else:
+            st_obj.dataframe(confirmed_table, use_container_width=True, hide_index=True)
+
+        st_obj.subheader("한도 바로 발송 가능")
+        if ready_table.empty:
+            st_obj.info("렌즈 컨펌일이 등록된 한도 바로 발송 가능 항목이 없습니다.")
+        else:
+            st_obj.dataframe(ready_table, use_container_width=True, hide_index=True)
+
+        st_obj.subheader("한도 제작 필요")
+        if pending_table.empty:
+            st_obj.success("한도 제작 필요 항목이 없습니다.")
+        else:
+            st_obj.dataframe(pending_table, use_container_width=True, hide_index=True)
+
+    compiled_app.render_limit_dashboard = _render_limit_dashboard_custom
 
 if hasattr(compiled_app, "build_duration_entries") and hasattr(compiled_app, "pd"):
     _orig_build_duration_entries = compiled_app.build_duration_entries
@@ -1135,6 +1631,8 @@ if hasattr(compiled_app, "render_sample_dashboard"):
     def _render_sample_dashboard_with_hint_relocated():
         st_obj = compiled_app.st
         original_caption = st_obj.caption
+        original_dataframe = getattr(st_obj, "dataframe", None)
+        original_data_editor = getattr(st_obj, "data_editor", None)
         suppressed_hint = {"value": False}
 
         def _caption_override(body=None, *args, **kwargs):
@@ -1143,11 +1641,38 @@ if hasattr(compiled_app, "render_sample_dashboard"):
                 return None
             return original_caption(body, *args, **kwargs)
 
+        def _display_data_without_removed_columns(data):
+            return _drop_removed_process_columns(data)
+
+        if callable(original_dataframe):
+            def _dataframe_without_removed_columns(data=None, *args, **kwargs):
+                return original_dataframe(
+                    _display_data_without_removed_columns(data),
+                    *args,
+                    **kwargs,
+                )
+
+            st_obj.dataframe = _dataframe_without_removed_columns
+
+        if callable(original_data_editor):
+            def _data_editor_without_removed_columns(data=None, *args, **kwargs):
+                return original_data_editor(
+                    _display_data_without_removed_columns(data),
+                    *args,
+                    **kwargs,
+                )
+
+            st_obj.data_editor = _data_editor_without_removed_columns
+
         st_obj.caption = _caption_override
         try:
             result = _orig_render_sample_dashboard()
         finally:
             st_obj.caption = original_caption
+            if callable(original_dataframe):
+                st_obj.dataframe = original_dataframe
+            if callable(original_data_editor):
+                st_obj.data_editor = original_data_editor
 
         left_col, right_col = st_obj.columns([1.35, 0.95])
         with left_col:
@@ -1177,6 +1702,8 @@ if hasattr(compiled_app, "render_factory_detail_page"):
     def _render_factory_detail_page_with_fixed_stage_width(factory_name):
         st_obj = compiled_app.st
         orig_columns = st_obj.columns
+        orig_dataframe = getattr(st_obj, "dataframe", None)
+        orig_data_editor = getattr(st_obj, "data_editor", None)
         orig_render_chart_card = getattr(compiled_app, "render_chart_card", None)
         orig_render_duration_trend_chart = getattr(compiled_app, "render_duration_trend_chart", None)
         chart_row_adjusted = False
@@ -1412,6 +1939,24 @@ if hasattr(compiled_app, "render_factory_detail_page"):
             )
 
         st_obj.columns = _columns_override
+        if callable(orig_dataframe):
+            def _dataframe_without_removed_columns(data=None, *args, **kwargs):
+                return orig_dataframe(
+                    _drop_removed_process_columns(data),
+                    *args,
+                    **kwargs,
+                )
+
+            st_obj.dataframe = _dataframe_without_removed_columns
+        if callable(orig_data_editor):
+            def _data_editor_without_removed_columns(data=None, *args, **kwargs):
+                return orig_data_editor(
+                    _drop_removed_process_columns(data),
+                    *args,
+                    **kwargs,
+                )
+
+            st_obj.data_editor = _data_editor_without_removed_columns
         if callable(orig_render_chart_card):
             compiled_app.render_chart_card = _render_chart_card_override
         if callable(orig_render_duration_trend_chart):
@@ -1420,6 +1965,10 @@ if hasattr(compiled_app, "render_factory_detail_page"):
             return _orig_render_factory_detail_page(factory_name)
         finally:
             st_obj.columns = orig_columns
+            if callable(orig_dataframe):
+                st_obj.dataframe = orig_dataframe
+            if callable(orig_data_editor):
+                st_obj.data_editor = orig_data_editor
             if callable(orig_render_chart_card):
                 compiled_app.render_chart_card = orig_render_chart_card
             if callable(orig_render_duration_trend_chart):
