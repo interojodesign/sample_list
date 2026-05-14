@@ -1707,6 +1707,65 @@ if hasattr(compiled_app, "render_factory_detail_page"):
         orig_render_chart_card = getattr(compiled_app, "render_chart_card", None)
         orig_render_duration_trend_chart = getattr(compiled_app, "render_duration_trend_chart", None)
         chart_row_adjusted = False
+        table_probe = {
+            "called": False,
+            "rows": 0,
+            "cols": 0,
+            "suspicious": False,
+        }
+
+        def _build_factory_detail_fallback_df():
+            pd_obj = getattr(compiled_app, "pd", None)
+            prepare_dashboard_data = getattr(compiled_app, "prepare_dashboard_data", None)
+            if pd_obj is None or not callable(prepare_dashboard_data):
+                return None
+
+            today = datetime.now()
+            start = today - timedelta(days=30)
+            end = today
+            prefix = f"factory_{factory_name}"
+            for key, value in dict(getattr(st_obj, "session_state", {}) or {}).items():
+                if prefix not in str(key) or "date_range" not in str(key):
+                    continue
+                if isinstance(value, (list, tuple)) and len(value) == 2:
+                    try:
+                        start_candidate = pd_obj.to_datetime(value[0], errors="coerce")
+                        end_candidate = pd_obj.to_datetime(value[1], errors="coerce")
+                        if (not pd_obj.isna(start_candidate)) and (not pd_obj.isna(end_candidate)):
+                            start = start_candidate.to_pydatetime()
+                            end = end_candidate.to_pydatetime()
+                            break
+                    except Exception:
+                        continue
+
+            source_df = getattr(st_obj.session_state, "df", None)
+            if source_df is None:
+                return None
+            prepared = prepare_dashboard_data(source_df, start, end)
+            location_col = getattr(compiled_app, "LOCATION_COLUMN", "샘플제작 공장위치")
+            if (
+                prepared is None
+                or not hasattr(prepared, "columns")
+                or not hasattr(prepared, "loc")
+                or location_col not in prepared.columns
+            ):
+                return None
+
+            detail = prepared.loc[
+                prepared[location_col].astype(str).str.strip() == str(factory_name).strip()
+            ].copy()
+            if detail.empty:
+                return detail
+            detail = detail.drop(columns=["__stage__", "__filter_date__"], errors="ignore")
+            detail = _drop_removed_process_columns(detail)
+            if detail is not None and hasattr(detail, "columns"):
+                internal_cols = [
+                    col for col in list(detail.columns)
+                    if str(col).strip().startswith("__")
+                ]
+                if internal_cols:
+                    detail = detail.drop(columns=internal_cols, errors="ignore")
+            return detail
 
         def _columns_override(spec, *args, **kwargs):
             nonlocal chart_row_adjusted
@@ -1941,11 +2000,41 @@ if hasattr(compiled_app, "render_factory_detail_page"):
         st_obj.columns = _columns_override
         if callable(orig_dataframe):
             def _dataframe_without_removed_columns(data=None, *args, **kwargs):
-                return orig_dataframe(
-                    _drop_removed_process_columns(data),
-                    *args,
-                    **kwargs,
-                )
+                cleaned = _drop_removed_process_columns(data)
+                table_probe["called"] = True
+                if cleaned is None or not hasattr(cleaned, "shape") or not hasattr(cleaned, "columns"):
+                    table_probe["suspicious"] = True
+                    fallback = _build_factory_detail_fallback_df()
+                    if fallback is not None and hasattr(fallback, "empty") and not fallback.empty:
+                        cleaned = fallback
+                if cleaned is not None and hasattr(cleaned, "shape") and hasattr(cleaned, "columns"):
+                    try:
+                        rows, cols = cleaned.shape
+                    except Exception:
+                        rows, cols = 0, 0
+                    table_probe["rows"] = int(rows or 0)
+                    table_probe["cols"] = int(cols or 0)
+                    try:
+                        normalized_cols = [str(col).strip() for col in list(cleaned.columns)]
+                        if len([col for col in normalized_cols if col]) <= 1:
+                            table_probe["suspicious"] = True
+                    except Exception:
+                        pass
+                    try:
+                        if table_probe["rows"] <= 1 and table_probe["cols"] <= 2:
+                            sample_cells = [
+                                str(value).strip().lower()
+                                for value in cleaned.astype(str).head(1).to_numpy().ravel().tolist()
+                            ]
+                            if any(cell == "empty" for cell in sample_cells):
+                                table_probe["suspicious"] = True
+                    except Exception:
+                        pass
+                    if bool(table_probe["suspicious"]):
+                        fallback = _build_factory_detail_fallback_df()
+                        if fallback is not None and hasattr(fallback, "empty") and not fallback.empty:
+                            cleaned = fallback
+                return orig_dataframe(cleaned, *args, **kwargs)
 
             st_obj.dataframe = _dataframe_without_removed_columns
         if callable(orig_data_editor):
@@ -1961,8 +2050,9 @@ if hasattr(compiled_app, "render_factory_detail_page"):
             compiled_app.render_chart_card = _render_chart_card_override
         if callable(orig_render_duration_trend_chart):
             compiled_app.render_duration_trend_chart = _render_duration_trend_chart_override
+        result = None
         try:
-            return _orig_render_factory_detail_page(factory_name)
+            result = _orig_render_factory_detail_page(factory_name)
         finally:
             st_obj.columns = orig_columns
             if callable(orig_dataframe):
@@ -1973,6 +2063,20 @@ if hasattr(compiled_app, "render_factory_detail_page"):
                 compiled_app.render_chart_card = orig_render_chart_card
             if callable(orig_render_duration_trend_chart):
                 compiled_app.render_duration_trend_chart = orig_render_duration_trend_chart
+        should_render_fallback = (not table_probe["called"]) or bool(table_probe["suspicious"])
+        if should_render_fallback:
+            try:
+                detail = _build_factory_detail_fallback_df()
+                if detail is not None and hasattr(detail, "empty") and not detail.empty:
+                    st_obj.caption("상세 목록을 다시 불러왔습니다.")
+                    st_obj.dataframe(
+                        detail,
+                        use_container_width=True,
+                        height=min(600, 200 + 35 * len(detail)),
+                    )
+            except Exception:
+                pass
+        return result
 
     compiled_app.render_factory_detail_page = _render_factory_detail_page_with_fixed_stage_width
 
@@ -2021,6 +2125,22 @@ if hasattr(compiled_app, "components") and hasattr(compiled_app.components, "htm
             **kwargs,
         ):
             try:
+                if isinstance(html_str, str):
+                    # Disable stale table scroll restoration script which can reopen
+                    # detail tables at invalid scroll positions and show blank rows.
+                    html_str = re.sub(
+                        r"<script>\s*\(\(\)\s*=>\s*\{.*?sample-manager-scroll-v1.*?\}\)\(\);\s*</script>",
+                        "",
+                        html_str,
+                        flags=re.DOTALL,
+                    )
+                    # Disable legacy anchor auto-scroll helper for the same reason.
+                    html_str = re.sub(
+                        r"<script>\s*\(\(\)\s*=>\s*\{.*?data-table-anchor.*?\}\)\(\);\s*</script>",
+                        "",
+                        html_str,
+                        flags=re.DOTALL,
+                    )
                 if isinstance(html_str, str) and "plotly" in html_str:
                     marker = "Plotly.newPlot"
                     split_idx = html_str.find(marker)
