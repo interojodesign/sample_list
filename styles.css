@@ -624,9 +624,9 @@ div[class*="st-key-stage_popup_native_"] {
 
 /* Sample dashboard upload panel spacing tune */
 .st-key-sample_upload_panel {
-  margin-top: 0;
+  margin-top: -6rem;
   position: relative;
-  z-index: 1;
+  z-index: 0;
 }
 
 .st-key-sample_upload_panel [data-testid="stVerticalBlock"] {
