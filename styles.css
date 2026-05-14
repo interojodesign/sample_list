@@ -622,11 +622,9 @@ div[class*="st-key-stage_popup_native_"] {
   height: 100%;
 }
 
-/* Sample dashboard upload panel spacing tune:
-   - increase gap above factory detail buttons
-   - pull upload expander upward to align with right-side guide end */
+/* Sample dashboard upload panel spacing tune */
 .st-key-sample_upload_panel {
-  margin-top: -5.05rem;
+  margin-top: 0;
   position: relative;
   z-index: 1;
 }

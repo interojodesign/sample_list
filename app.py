@@ -128,6 +128,17 @@ _RESTORED_OPTIONAL_COLUMNS = ("인쇄 시작일",)
 def _drop_removed_process_columns(df):
     if df is None or not hasattr(df, "columns"):
         return df
+    try:
+        to_drop = [
+            col
+            for col in list(getattr(df, "columns", []))
+            if str(col).strip() in _REMOVED_PROCESS_COLUMNS
+        ]
+        if not to_drop:
+            return df
+        return df.drop(columns=to_drop, errors="ignore")
+    except Exception:
+        return df
 
 
 def _ensure_columns_present(df, columns):
@@ -140,17 +151,6 @@ def _ensure_columns_present(df, columns):
     except Exception:
         return df
     return df
-    try:
-        to_drop = [
-            col
-            for col in list(getattr(df, "columns", []))
-            if str(col).strip() in _REMOVED_PROCESS_COLUMNS
-        ]
-        if not to_drop:
-            return df
-        return df.drop(columns=to_drop, errors="ignore")
-    except Exception:
-        return df
 
 
 def _strip_removed_process_columns_from_defaults() -> None:
