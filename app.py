@@ -1615,12 +1615,15 @@ if hasattr(compiled_app, "render_sample_dashboard"):
     def _render_sample_upload_box() -> None:
         st_obj = compiled_app.st
         upload_sig_key = "_sample_dashboard_applied_upload_sig"
+        upload_key_version_key = "_sample_dashboard_upload_key_version"
+        upload_key_version = int(st_obj.session_state.get(upload_key_version_key, 0) or 0)
+        upload_widget_key = f"sample_dashboard_upload_file_{upload_key_version}"
 
         with st_obj.expander("샘플 리스트 엑셀 업로드", expanded=False):
             uploaded = st_obj.file_uploader(
                 "sample-list.xlsx 파일 선택",
                 type=["xlsx"],
-                key="sample_dashboard_upload_file",
+                key=upload_widget_key,
                 help="업로드 즉시 대시보드 데이터에 반영됩니다.",
             )
 
@@ -1634,8 +1637,9 @@ if hasattr(compiled_app, "render_sample_dashboard"):
             raw_bytes = uploaded.getvalue()
             file_sig = f"{uploaded.name}:{uploaded.size}:{hashlib.sha256(raw_bytes).hexdigest()}"
             if st_obj.session_state.get(upload_sig_key) == file_sig:
-                st_obj.info("이미 반영된 동일 파일입니다.")
-                return
+                st_obj.session_state[upload_key_version_key] = upload_key_version + 1
+                st_obj.info("이미 반영된 동일한 내용입니다. 파일 선택을 초기화합니다.")
+                st_obj.rerun()
 
             try:
                 uploaded_df = compiled_app.read_uploaded_file(uploaded)
@@ -1658,6 +1662,7 @@ if hasattr(compiled_app, "render_sample_dashboard"):
             st_obj.session_state["status"] = f"{uploaded.name} 업로드 반영 완료"
             st_obj.session_state["last_uploaded_sig"] = file_sig
             st_obj.session_state[upload_sig_key] = file_sig
+            st_obj.session_state[upload_key_version_key] = upload_key_version + 1
 
             remember_last_file = getattr(compiled_app, "remember_last_file", None)
             if callable(remember_last_file):
