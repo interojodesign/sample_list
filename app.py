@@ -571,10 +571,35 @@ if hasattr(compiled_app, "prepare_dashboard_data") and hasattr(compiled_app, "pd
             _coerce_period_bound(end_date),
         )
         try:
-            if result is None or getattr(result, "empty", True):
+            if result is None:
+                return result
+
+            try:
+                if (
+                    df is not None
+                    and hasattr(df, "columns")
+                    and hasattr(df, "loc")
+                    and "제작 현황" in df.columns
+                ):
+                    active_mask = df["제작 현황"].astype(str).str.contains("진행", na=False)
+                    active_rows = df.loc[active_mask]
+                    if not getattr(active_rows, "empty", True):
+                        result = pd_obj.concat([result, active_rows], axis=0)
+                        dedupe_cols = [
+                            col
+                            for col in list(df.columns)
+                            if col in getattr(result, "columns", [])
+                        ]
+                        if dedupe_cols:
+                            result = result.drop_duplicates(subset=dedupe_cols, keep="first")
+            except Exception:
+                pass
+
+            if getattr(result, "empty", True):
                 return result
             if "__stage__" not in getattr(result, "columns", []):
-                return result
+                result = result.copy()
+                result["__stage__"] = ""
 
             determine_stage_fn = getattr(compiled_app, "determine_stage", None)
             if callable(determine_stage_fn):
