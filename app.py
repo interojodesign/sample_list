@@ -554,13 +554,36 @@ if hasattr(compiled_app, "prepare_dashboard_data") and hasattr(compiled_app, "pd
     _orig_prepare_dashboard_data = compiled_app.prepare_dashboard_data
 
     def _prepare_dashboard_data_with_missing_shipment_overlay(df, start_date, end_date):
-        result = _orig_prepare_dashboard_data(df, start_date, end_date)
+        pd_obj = compiled_app.pd
+
+        def _coerce_period_bound(value):
+            try:
+                parsed = pd_obj.to_datetime(value, errors="coerce")
+                if not pd_obj.isna(parsed):
+                    return parsed
+            except Exception:
+                pass
+            return value
+
+        result = _orig_prepare_dashboard_data(
+            df,
+            _coerce_period_bound(start_date),
+            _coerce_period_bound(end_date),
+        )
         try:
-            pd_obj = compiled_app.pd
             if result is None or getattr(result, "empty", True):
                 return result
             if "__stage__" not in getattr(result, "columns", []):
                 return result
+
+            determine_stage_fn = getattr(compiled_app, "determine_stage", None)
+            if callable(determine_stage_fn):
+                today = datetime.now()
+                result = result.copy()
+                result["__stage__"] = result.apply(
+                    lambda row: _normalize_stage_label(determine_stage_fn(row, today)),
+                    axis=1,
+                )
 
             parse_date_fn = getattr(compiled_app, "parse_date", None)
             delay_col = getattr(compiled_app, "DELAY_DATE_COLUMN", None)
